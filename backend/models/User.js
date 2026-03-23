@@ -35,17 +35,16 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-userSchema.pre('save', async function (next) {
+// Pre-save hook to hash the password before saving to the database
+userSchema.pre('save', async function () {
+  // Only hash the password if it has been modified (or is new)
   if (!this.isModified('password')) {
-    return next();
+    return; // Just return to exit, no next() needed!
   }
-  try {
-    const salt = await bcrypt.genSalt(10);
-    this.password = await bcrypt.hash(this.password, salt);
-    next();
-  } catch (error) {
-    next(error);
-  }
+
+  // Mongoose automatically catches errors in async functions now, so no try/catch is needed
+  const salt = await bcrypt.genSalt(10);
+  this.password = await bcrypt.hash(this.password, salt);
 });
 
 userSchema.methods.matchPassword = async function (enteredPassword) {
