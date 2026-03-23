@@ -4,8 +4,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import connectDB from './config/db.js';
 
-import dns from "node:dns/promises";
-dns.setServers(["1.1.1.1", "8.8.8.8"]);
+import authRoutes from './routes/authRoutes.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -37,6 +36,8 @@ app.use(cookieParser());
 app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'success', message: 'FastApply API is running.' });
 });
+
+app.use('/api/auth', authRoutes);
 
 // --- Global Error Handler ---
 // This prevents the server from crashing and sends clean errors to the frontend
