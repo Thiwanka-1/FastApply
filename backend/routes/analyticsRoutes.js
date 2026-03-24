@@ -1,21 +1,25 @@
 import express from 'express';
 import { 
-  addApplication, 
-  getAnalytics, 
-  deleteApplication 
+  logAutofill, getUserAnalytics, updateLog, deleteLog, clearUserHistory, getGlobalAnalytics 
 } from '../controllers/analyticsController.js';
-import { protect } from '../middleware/authMiddleware.js';
+import { protect, admin } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-// All analytics routes require authentication
-router.use(protect);
+router.use(protect); // All routes require login
 
+// Normal User Routes
 router.route('/')
-  .post(addApplication)
-  .get(getAnalytics);
+  .post(logAutofill)
+  .get(getUserAnalytics);
+
+router.delete('/clear-history', clearUserHistory);
 
 router.route('/:id')
-  .delete(deleteApplication);
+  .put(updateLog)
+  .delete(deleteLog);
+
+// Admin Routes
+router.get('/admin/global', admin, getGlobalAnalytics);
 
 export default router;

@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 
-const applicationSchema = new mongoose.Schema(
+const autofillLogSchema = new mongoose.Schema(
   {
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -15,19 +15,11 @@ const applicationSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    jobLink: {
+    jobUrl: {
       type: String,
       default: '',
     },
-    companyLink: {
-      type: String,
-      default: '',
-    },
-    status: {
-      type: String,
-      default: 'Applied', // Could be 'Applied', 'Interviewing', 'Rejected' later
-    },
-    dateApplied: {
+    dateLogged: {
       type: Date,
       default: Date.now,
     }
@@ -35,5 +27,5 @@ const applicationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const Application = mongoose.model('Application', applicationSchema);
-export default Application;
+const AutofillLog = mongoose.model('AutofillLog', autofillLogSchema);
+export default AutofillLog;

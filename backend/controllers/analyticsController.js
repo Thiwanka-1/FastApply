@@ -1,86 +1,110 @@
-import Application from '../models/Application.js';
+import AutofillLog from '../models/AutofillLog.js';
+import User from '../models/User.js';
 
-// @desc    Add a newly submitted job application
+// ==========================================
+// USER ANALYTICS FUNCTIONS
+// ==========================================
+
+// @desc    Log a new autofilled job application
 // @route   POST /api/analytics
-export const addApplication = async (req, res, next) => {
+export const logAutofill = async (req, res, next) => {
   try {
-    const { jobTitle, company, jobLink, companyLink, status } = req.body;
-
-    const application = await Application.create({
-      user: req.user._id,
-      jobTitle,
-      company,
-      jobLink,
-      companyLink,
-      status: status || 'Applied'
-    });
-
-    res.status(201).json(application);
-  } catch (error) { 
-    next(error); 
-  }
+    const { jobTitle, company, jobUrl } = req.body;
+    const log = await AutofillLog.create({ user: req.user._id, jobTitle, company, jobUrl });
+    res.status(201).json(log);
+  } catch (error) { next(error); }
 };
 
-// @desc    Get user's application stats and list
+// @desc    Get user's personal analytics & history
 // @route   GET /api/analytics
-export const getAnalytics = async (req, res, next) => {
+export const getUserAnalytics = async (req, res, next) => {
   try {
-    // 1. Fetch all applications for this user, sorted newest first
-    const applications = await Application.find({ user: req.user._id }).sort({ dateApplied: -1 });
+    const logs = await AutofillLog.find({ user: req.user._id }).sort({ dateLogged: -1 });
 
-    // 2. Calculate Dates for filtering
     const now = new Date();
-    
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    
     const startOfMonth = new Date(now.getTime());
-    startOfMonth.setDate(now.getDate() - 30); // Last 30 days
+    startOfMonth.setDate(now.getDate() - 30);
 
-    // 3. Calculate Stats
     let todayCount = 0;
     let monthCount = 0;
-    const totalCount = applications.length;
 
-    applications.forEach(app => {
-      const appDate = new Date(app.dateApplied);
-      if (appDate >= startOfToday) todayCount++;
-      if (appDate >= startOfMonth) monthCount++;
+    logs.forEach(log => {
+      const logDate = new Date(log.dateLogged);
+      if (logDate >= startOfToday) todayCount++;
+      if (logDate >= startOfMonth) monthCount++;
     });
 
-    // 4. Send back the compiled dashboard data
     res.status(200).json({
-      stats: {
-        today: todayCount,
-        monthly: monthCount,
-        total: totalCount
-      },
-      applications // The full array to display in the list/board
+      stats: { today: todayCount, monthly: monthCount, total: logs.length },
+      history: logs 
     });
-  } catch (error) { 
-    next(error); 
-  }
+  } catch (error) { next(error); }
 };
 
-// @desc    Delete a tracked application (if user made a mistake)
-// @route   DELETE /api/analytics/:id
-export const deleteApplication = async (req, res, next) => {
+// @desc    Update a specific log (e.g., fix a typo in the company name)
+// @route   PUT /api/analytics/:id
+export const updateLog = async (req, res, next) => {
   try {
-    const application = await Application.findById(req.params.id);
-
-    if (!application) {
+    let log = await AutofillLog.findById(req.params.id);
+    if (!log || log.user.toString() !== req.user._id.toString()) {
       res.status(404);
-      throw new Error('Application not found');
+      throw new Error('Log not found or unauthorized');
     }
+    
+    log.jobTitle = req.body.jobTitle || log.jobTitle;
+    log.company = req.body.company || log.company;
+    log.jobUrl = req.body.jobUrl || log.jobUrl;
+    
+    const updatedLog = await log.save();
+    res.status(200).json(updatedLog);
+  } catch (error) { next(error); }
+};
 
-    // Ensure the user actually owns this application record
-    if (application.user.toString() !== req.user._id.toString()) {
-      res.status(401);
-      throw new Error('Not authorized to delete this record');
+// @desc    Delete a single log
+// @route   DELETE /api/analytics/:id
+export const deleteLog = async (req, res, next) => {
+  try {
+    const log = await AutofillLog.findById(req.params.id);
+    if (!log || log.user.toString() !== req.user._id.toString()) {
+      res.status(404);
+      throw new Error('Log not found or unauthorized');
     }
+    await log.deleteOne();
+    res.status(200).json({ message: 'Autofill log removed' });
+  } catch (error) { next(error); }
+};
 
-    await application.deleteOne();
-    res.status(200).json({ message: 'Application removed from tracking' });
-  } catch (error) { 
-    next(error); 
-  }
+// @desc    Clear ALL autofill history for the user
+// @route   DELETE /api/analytics/clear-history
+export const clearUserHistory = async (req, res, next) => {
+  try {
+    await AutofillLog.deleteMany({ user: req.user._id });
+    res.status(200).json({ message: 'All autofill history cleared successfully' });
+  } catch (error) { next(error); }
+};
+
+// ==========================================
+// ADMIN ANALYTICS FUNCTIONS
+// ==========================================
+
+// @desc    Get global platform analytics (Admin Only)
+// @route   GET /api/analytics/admin/global
+export const getGlobalAnalytics = async (req, res, next) => {
+  try {
+    const totalUsers = await User.countDocuments({ role: 'user' });
+    const totalAutofills = await AutofillLog.countDocuments();
+    
+    // Advanced Aggregation: Get the top 5 most popular companies users are applying to
+    const topCompanies = await AutofillLog.aggregate([
+      { $group: { _id: "$company", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 5 }
+    ]);
+
+    res.status(200).json({
+      platformStats: { totalUsers, totalAutofills },
+      topCompanies
+    });
+  } catch (error) { next(error); }
 };
