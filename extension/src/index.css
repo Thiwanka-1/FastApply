@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+/* Base dark mode styles to match SpeedyApply */
+body {
+  background-color: #111827;
+  color: #f3f4f6;
+}

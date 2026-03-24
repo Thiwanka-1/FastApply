@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "FastApply: Job Application Autofill",
+  "version": "1.0.0",
+  "description": "Automate data entry across major Applicant Tracking Systems.",
+  "action": {
+    "default_title": "FastApply Quick Access",
+    "default_popup": "popup.html"
+  },
+  "options_page": "index.html",
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "sidePanel",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "http://localhost:5000/*",
+    "https://*/*"
+  ]
+}
