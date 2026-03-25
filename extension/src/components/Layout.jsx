@@ -24,15 +24,19 @@ const Layout = () => {
     navigate('/login');
   };
 
-  const navLinks = [
-    { path: '/', name: 'Profile Engine', icon: LayoutDashboard },
-    { path: '/analytics', name: 'Telemetry', icon: BarChart3 },
-    { path: '/settings', name: 'Account Settings', icon: Settings }, // ADD THIS LINE
-  ];
+  // Dynamically build the navigation based on the user's role
+  const navLinks = [];
 
-  // Add Admin panel only if the user is an admin
   if (user?.role === 'admin') {
+    // Admin View
     navLinks.push({ path: '/admin', name: 'Command Center', icon: ShieldAlert });
+    navLinks.push({ path: '/analytics', name: 'Global Telemetry', icon: BarChart3 });
+    navLinks.push({ path: '/settings', name: 'Account Settings', icon: Settings });
+  } else {
+    // Normal User View
+    navLinks.push({ path: '/', name: 'Profile Engine', icon: LayoutDashboard });
+    navLinks.push({ path: '/analytics', name: 'Telemetry', icon: BarChart3 });
+    navLinks.push({ path: '/settings', name: 'Account Settings', icon: Settings });
   }
 
   const getPageTitle = () => {
