@@ -90,21 +90,31 @@ export const clearUserHistory = async (req, res, next) => {
 
 // @desc    Get global platform analytics (Admin Only)
 // @route   GET /api/analytics/admin/global
+// @desc    Get global platform analytics (Admin Only)
+// @route   GET /api/analytics/admin/global
+// @desc    Get global platform analytics (Admin Only)
+// @route   GET /api/analytics/admin/global
 export const getGlobalAnalytics = async (req, res, next) => {
   try {
     const totalUsers = await User.countDocuments({ role: 'user' });
     const totalAutofills = await AutofillLog.countDocuments();
     
-    // Advanced Aggregation: Get the top 5 most popular companies users are applying to
+    // Get the top 5 most popular companies across the whole platform
     const topCompanies = await AutofillLog.aggregate([
       { $group: { _id: "$company", count: { $sum: 1 } } },
       { $sort: { count: -1 } },
       { $limit: 5 }
     ]);
 
+    // Fetch ALL logs populated with user info so the frontend can filter them dynamically
+    const history = await AutofillLog.find({})
+      .sort({ dateLogged: -1 })
+      .populate('user', 'name email');
+
     res.status(200).json({
       platformStats: { totalUsers, totalAutofills },
-      topCompanies
+      topCompanies,
+      history // Sending the full history array
     });
   } catch (error) { next(error); }
 };

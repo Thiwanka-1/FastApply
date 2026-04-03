@@ -12,8 +12,9 @@ const Login = () => {
   const { user, login } = useContext(AuthContext);
   const navigate = useNavigate();
 
+  // DYNAMIC REDIRECT: Routes admins to /admin and normal users to /
   if (user) {
-    return <Navigate to="/" replace />;
+    return <Navigate to={user.role === 'admin' ? '/admin' : '/'} replace />;
   }
 
   const validateForm = () => {
@@ -38,7 +39,9 @@ const Login = () => {
 
     try {
       await login(email, password);
-      navigate('/'); 
+      // We removed navigate('/') here. 
+      // Once login() finishes, the global 'user' state updates, 
+      // and the 'if (user)' block above automatically handles the correct routing!
     } catch (err) {
       setError(err.response?.data?.message || 'Invalid email or password.');
     }
