@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "FastApply: Job Application Autofill",
+  "name": "FastApply AI",
   "version": "1.0.0",
-  "description": "Automate data entry across major Applicant Tracking Systems.",
+  "description": "Smart job application autofill engine.",
   "action": {
     "default_title": "FastApply Quick Access",
     "default_popup": "popup.html"
@@ -11,14 +11,47 @@
   "side_panel": {
     "default_path": "sidepanel.html"
   },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.lever.co/*"
+      ],
+      "js": ["utils.js", "lever.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://*.greenhouse.io/*",
+        "https://boards.greenhouse.io/*"
+      ],
+      "js": ["utils.js", "greenhouse.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://jobs.ashbyhq.com/*",
+        "https://*.ashbyhq.com/*"
+      ],
+      "js": ["utils.js", "ashby.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
   "permissions": [
     "storage",
     "activeTab",
     "sidePanel",
-    "clipboardWrite"
+    "clipboardWrite",
+    "scripting"
   ],
   "host_permissions": [
     "http://localhost:5000/*",
-    "https://*/*"
+    "http://localhost:5173/*",
+    "<all_urls>"
   ]
 }

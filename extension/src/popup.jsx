@@ -17,17 +17,49 @@ function Popup() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
 
   useEffect(() => {
-    const fetchStats = async () => {
+    const fetchSystemData = async () => {
       try {
-        const { data } = await axios.get(`${API_URL}/api/analytics`);
-        setStats({ today: data.stats.today, goal: 10 }); 
+        // Fetch BOTH Stats and Profile Data simultaneously
+        const [statsRes, profileRes] = await Promise.all([
+          axios.get(`${API_URL}/api/analytics`),
+          axios.get(`${API_URL}/api/profile`)
+        ]);
+        
+        setStats({ today: statsRes.data.stats.today, goal: 10 }); 
         setIsLoggedIn(true);
+
+        // CACHE THE PROFILE DATA INTO CHROME STORAGE
+        if (window.chrome && chrome.storage) {
+          chrome.storage.local.set({ 
+            profileData: profileRes.data 
+          });
+        }
+
       } catch (err) {
         setIsLoggedIn(false);
       }
     };
-    fetchStats();
+    
+    fetchSystemData();
+
+    // Load the toggle state
+    if (window.chrome && chrome.storage) {
+      chrome.storage.local.get(['autofillEnabled'], (res) => {
+        if (res.autofillEnabled !== undefined) {
+          setAutofillEnabled(res.autofillEnabled);
+        }
+      });
+    }
   }, []);
+
+  // 3. Handle the toggle click to update state AND Chrome Storage
+  const toggleAutofill = () => {
+    const newState = !autofillEnabled;
+    setAutofillEnabled(newState); // Update UI
+    if (window.chrome && chrome.storage) {
+      chrome.storage.local.set({ autofillEnabled: newState }); // Update Browser Memory
+    }
+  };
 
   const radius = 50;
   const circumference = 2 * Math.PI * radius;
@@ -35,7 +67,6 @@ function Popup() {
   const strokeDashoffset = circumference - progress * circumference;
 
   const openDashboard = (hash) => {
-    // FIXED: Now uses the FRONTEND_URL to open the correct port
     window.open(`${FRONTEND_URL}/#${hash}`, '_blank');
   };
 
@@ -45,7 +76,7 @@ function Popup() {
       try {
         // Gets the current active tab
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        // Opens the side panel for that specific tab
+        // Opens the side panel for that specific tab natively in Chrome
         await chrome.sidePanel.open({ windowId: tab.windowId });
       } catch (err) {
         console.error("Failed to open side panel:", err);
@@ -117,7 +148,7 @@ function Popup() {
         </button>
       </div>
 
-      {/* NEW: Quick Access Button */}
+      {/* Quick Access Button */}
       <div className="flex justify-center mb-4 relative z-10">
         <button 
           onClick={handleQuickAccess}
@@ -137,9 +168,9 @@ function Popup() {
           </div>
         </div>
         
-        {/* Toggle Switch UI */}
+        {/* Toggle Switch UI connected to toggleAutofill function */}
         <button 
-          onClick={() => setAutofillEnabled(!autofillEnabled)}
+          onClick={toggleAutofill}
           className={`w-12 h-6 rounded-full transition-colors relative flex items-center px-1 focus:outline-none ${autofillEnabled ? 'bg-cyan-500' : 'bg-slate-700'}`}
         >
           <div className={`w-4 h-4 bg-white rounded-full transition-transform transform shadow-md ${autofillEnabled ? 'translate-x-6' : 'translate-x-0'}`}></div>
