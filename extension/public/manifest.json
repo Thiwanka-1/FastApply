@@ -19,7 +19,10 @@
       "matches": [
         "https://*.lever.co/*"
       ],
-      "js": ["utils.js", "lever.js"],
+      "js": [
+        "utils.js",
+        "lever.js"
+      ],
       "run_at": "document_idle",
       "all_frames": true
     },
@@ -28,7 +31,10 @@
         "https://*.greenhouse.io/*",
         "https://boards.greenhouse.io/*"
       ],
-      "js": ["utils.js", "greenhouse.js"],
+      "js": [
+        "utils.js",
+        "greenhouse.js"
+      ],
       "run_at": "document_idle",
       "all_frames": true
     },
@@ -37,7 +43,68 @@
         "https://jobs.ashbyhq.com/*",
         "https://*.ashbyhq.com/*"
       ],
-      "js": ["utils.js", "ashby.js"],
+      "js": [
+        "utils.js",
+        "ashby.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://*.bamboohr.com/careers/*",
+        "https://*.bamboohr.com/jobs/*"
+      ],
+      "js": [
+        "utils.js",
+        "bamboohr.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://*.rippling-ats.com/*",
+        "https://*.rippling.com/*"
+      ],
+      "js": [
+        "utils.js",
+        "rippling.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://*.myworkdayjobs.com/*"
+      ],
+      "js": [
+        "utils.js",
+        "workday-orchestrator.js",
+        "workday-personal.js",
+        "workday-experience.js",
+        "workday-experience-work.js",
+        "workday-experience-education.js",
+        "workday-experience-skills.js",
+        "workday-eeo.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "exclude_matches": [
+        "https://*.lever.co/*",
+        "https://*.greenhouse.io/*",
+        "https://boards.greenhouse.io/*",
+        "https://jobs.ashbyhq.com/*",
+        "https://*.ashbyhq.com/*",
+        "https://*.bamboohr.com/*",
+        "https://*.rippling-ats.com/*",
+        "https://*.rippling.com/*",
+        "https://*.myworkdayjobs.com/*"
+      ],
+      "js": ["utils.js", "generic.js"],
       "run_at": "document_idle",
       "all_frames": true
     }
@@ -45,6 +112,7 @@
   "permissions": [
     "storage",
     "activeTab",
+    "tabs",
     "sidePanel",
     "clipboardWrite",
     "scripting"
