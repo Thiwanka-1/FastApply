@@ -105,6 +105,34 @@
         "https://*.myworkdayjobs.com/*"
       ],
       "js": ["utils.js", "generic.js"],
+<<<<<<< HEAD
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://*.smartrecruiters.com/*",
+        "https://jobs.smartrecruiters.com/*",
+        "https://careers.smartrecruiters.com/*"
+      ],
+      "js": [
+        "utils.js",
+        "smartrecruiters-engine.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://*.eightfold.ai/*",
+        "https://app.eightfold.ai/*"
+      ],
+      "js": [
+        "utils.js",
+        "eightfold-engine.js"
+      ],
+=======
+>>>>>>> c6ea9e84dafabdc0bed885cc05a4f7baf63e8550
       "run_at": "document_idle",
       "all_frames": true
     }
