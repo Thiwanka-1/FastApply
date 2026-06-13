@@ -102,7 +102,8 @@
         "https://*.bamboohr.com/*",
         "https://*.rippling-ats.com/*",
         "https://*.rippling.com/*",
-        "https://*.myworkdayjobs.com/*"
+        "https://*.myworkdayjobs.com/*",
+        "https://*.icims.com/*"
       ],
       "js": ["utils.js", "generic.js"],
 
@@ -130,6 +131,17 @@
       "js": [
         "utils.js",
         "eightfold-engine.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://*.icims.com/*"
+      ],
+      "js": [
+        "utils.js",
+        "icims-engine.js"
       ],
       "run_at": "document_idle",
       "all_frames": true
