@@ -1,6 +1,13 @@
 import Profile from '../models/Profile.js';
 import { storage } from '../config/firebase.js';
 import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
+import mammoth from 'mammoth';
+import { extractProfileData } from '../services/llmService.js';
+
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const pdfParse = require('pdf-parse');
+
 
 // @desc    Get current user's profile
 // @route   GET /api/profile
@@ -133,4 +140,81 @@ export const clearProfileSection = async (req, res, next) => {
 
     res.status(200).json({ message: `${sectionName} cleared successfully`, profile: updatedProfile });
   } catch (error) { next(error); }
+};
+
+// @desc    Parse uploaded docs, extract data via AI, and update profile
+// @route   POST /api/profile/parse-docs
+export const parseDocumentsAndPopulateProfile = async (req, res, next) => {
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ message: 'No documents uploaded for parsing.' });
+    }
+
+    let combinedTextContent = "";
+
+    for (const file of req.files) {
+      if (file.mimetype === 'application/pdf') {
+        const parsedPdf = await pdfParse(file.buffer);
+        combinedTextContent += `\n--- Document: PDF ---\n${parsedPdf.text}`;
+      } else if (
+        file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || 
+        file.mimetype === 'application/msword'
+      ) {
+        const parsedWord = await mammoth.extractRawText({ buffer: file.buffer });
+        combinedTextContent += `\n--- Document: Word ---\n${parsedWord.value}`;
+      }
+    }
+
+    // Call the AI
+    const extractedData = await extractProfileData(combinedTextContent);
+    
+    // DEBUGGING: Watch the terminal to see EXACTLY what Llama extracted!
+    console.log("🔥 AI Extracted Data:", JSON.stringify(extractedData, null, 2));
+
+    let profile = await Profile.findOne({ user: req.user._id });
+
+    // Helper function to strip empty AI fields so we don't overwrite valid existing DB data with blanks
+    const removeEmptyFields = (obj) => {
+      if (!obj) return {};
+      const cleaned = {};
+      for (const [key, value] of Object.entries(obj)) {
+        if (value !== "" && value !== null && (!Array.isArray(value) || value.length > 0)) {
+          cleaned[key] = value;
+        }
+      }
+      return cleaned;
+    };
+
+    if (!profile) {
+      profile = new Profile({ user: req.user._id, ...extractedData });
+      await profile.save();
+    } else {
+      const updatePayload = {};
+      
+      if (extractedData.personalInfo) updatePayload.personalInfo = { ...profile.personalInfo.toObject(), ...removeEmptyFields(extractedData.personalInfo) };
+      if (extractedData.contactInfo) updatePayload.contactInfo = { ...profile.contactInfo.toObject(), ...removeEmptyFields(extractedData.contactInfo) };
+      if (extractedData.websitesAndSkills) updatePayload.websitesAndSkills = { ...profile.websitesAndSkills.toObject(), ...removeEmptyFields(extractedData.websitesAndSkills) };
+      
+      // For Arrays (History), we overwrite completely if AI found new data
+      if (extractedData.workHistory && extractedData.workHistory.length > 0) updatePayload.workHistory = extractedData.workHistory;
+      if (extractedData.educationHistory && extractedData.educationHistory.length > 0) updatePayload.educationHistory = extractedData.educationHistory;
+      
+      if (extractedData.eeo) updatePayload.eeo = { ...profile.eeo.toObject(), ...removeEmptyFields(extractedData.eeo) };
+
+      profile = await Profile.findOneAndUpdate(
+        { user: req.user._id },
+        { $set: updatePayload },
+        { returnDocument: 'after', runValidators: true } // <-- Changed 'new: true' to 'returnDocument: 'after''
+      );
+    }
+
+    res.status(200).json({ 
+      message: 'Profile successfully autofilled from documents!', 
+      profile 
+    });
+
+  } catch (error) {
+    console.error("Document Parsing Error:", error);
+    next(error);
+  }
 };
