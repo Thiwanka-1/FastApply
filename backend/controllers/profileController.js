@@ -2,12 +2,23 @@ import Profile from '../models/Profile.js';
 import { storage } from '../config/firebase.js';
 import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
 import mammoth from 'mammoth';
-import { extractProfileData } from '../services/llmService.js';
+import { PDFParse } from 'pdf-parse';
+import { extractProfileData, generateFormAnswers } from '../services/llmService.js';
 
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
+// import { createRequire } from 'module';
+// const require = createRequire(import.meta.url);
+// const pdfParse = require('pdf-parse');
 
+const extractPdfText = async (buffer) => {
+  const parser = new PDFParse({ data: buffer });
+
+  try {
+    const result = await parser.getText();
+    return result.text || '';
+  } finally {
+    await parser.destroy();
+  }
+};
 
 // @desc    Get current user's profile
 // @route   GET /api/profile
@@ -142,7 +153,7 @@ export const clearProfileSection = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-// @desc    Parse uploaded docs, extract data via AI, and update profile
+// @desc    Parse uploaded docs, extract data via AI, upload to Firebase, and save AI Memory Bank
 // @route   POST /api/profile/parse-docs
 export const parseDocumentsAndPopulateProfile = async (req, res, next) => {
   try {
@@ -151,21 +162,118 @@ export const parseDocumentsAndPopulateProfile = async (req, res, next) => {
     }
 
     let combinedTextContent = "";
+    
+    // Variables to hold our Memory Bank data before saving
+    let resumeMetadata = null;
+    let cqfoMetadata = null;
+    let coverLetterMetadata = null;
 
+    // 1. Loop through files: Parse Text & Upload to Firebase
+    // for (const file of req.files) {
+    //   let fileText = "";
+    //   const lowerName = file.originalname.toLowerCase();
+
+    //   // Extract raw text
+    //   if (file.mimetype === 'application/pdf') {
+    //     fileText = await extractPdfText(file.buffer);
+    //   } else if (
+    //     file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || 
+    //     file.mimetype === 'application/msword'
+    //   ) {
+    //     const parsedWord = await mammoth.extractRawText({ buffer: file.buffer });
+    //     fileText = parsedWord.value;
+    //   }
+
+    //   // Upload the actual file to Firebase Storage to save DB space
+    //   const fileName = `${req.user._id}_${Date.now()}_${file.originalname}`;
+    //   const storageRef = ref(storage, `user_documents/${fileName}`);
+    //   const metadata = { contentType: file.mimetype };
+    //   const snapshot = await uploadBytesResumable(storageRef, file.buffer, metadata);
+    //   const downloadURL = await getDownloadURL(snapshot.ref);
+
+    //   // Create the object that will be saved to MongoDB
+    //   const fileData = {
+    //     fileName: file.originalname,
+    //     fileUrl: downloadURL,
+    //     rawText: fileText // <-- This is the crucial AI Memory Bank data
+    //   };
+
+    //   // Categorize the document
+    //   if (lowerName.includes('cover') || lowerName.includes('letter')) {
+    //     coverLetterMetadata = fileData;
+    //     combinedTextContent += `\n--- Cover Letter ---\n${fileText}`;
+    //   } else if (lowerName.includes('cqfo') || lowerName.includes('questionnaire')) {
+    //     cqfoMetadata = fileData;
+    //     combinedTextContent += `\n--- CQFO ---\n${fileText}`;
+    //   } else {
+    //     resumeMetadata = fileData;
+    //     combinedTextContent += `\n--- Resume ---\n${fileText}`;
+    //   }
+    // }
     for (const file of req.files) {
-      if (file.mimetype === 'application/pdf') {
-        const parsedPdf = await pdfParse(file.buffer);
-        combinedTextContent += `\n--- Document: PDF ---\n${parsedPdf.text}`;
-      } else if (
-        file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || 
-        file.mimetype === 'application/msword'
-      ) {
-        const parsedWord = await mammoth.extractRawText({ buffer: file.buffer });
-        combinedTextContent += `\n--- Document: Word ---\n${parsedWord.value}`;
-      }
-    }
+  let fileText = '';
+  const lowerName = file.originalname.toLowerCase();
 
-    // Call the AI
+  if (file.mimetype === 'application/pdf') {
+    fileText = await extractPdfText(file.buffer);
+  } else if (
+    file.mimetype ===
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    file.mimetype === 'application/msword'
+  ) {
+    const parsedWord = await mammoth.extractRawText({
+      buffer: file.buffer
+    });
+
+    fileText = parsedWord.value || '';
+  } else {
+    console.warn(
+      `Unsupported document type: ${file.originalname} (${file.mimetype})`
+    );
+    continue;
+  }
+
+  const fileName =
+    `${req.user._id}_${Date.now()}_${file.originalname}`;
+
+  const storageRef = ref(
+    storage,
+    `user_documents/${fileName}`
+  );
+
+  const metadata = {
+    contentType: file.mimetype
+  };
+
+  const snapshot = await uploadBytesResumable(
+    storageRef,
+    file.buffer,
+    metadata
+  );
+
+  const downloadURL = await getDownloadURL(snapshot.ref);
+
+  const fileData = {
+    fileName: file.originalname,
+    fileUrl: downloadURL,
+    rawText: fileText
+  };
+
+  if (lowerName.includes('cover') || lowerName.includes('letter')) {
+    coverLetterMetadata = fileData;
+    combinedTextContent += `\n--- Cover Letter ---\n${fileText}`;
+  } else if (
+    lowerName.includes('cqfo') ||
+    lowerName.includes('questionnaire')
+  ) {
+    cqfoMetadata = fileData;
+    combinedTextContent += `\n--- CQFO ---\n${fileText}`;
+  } else {
+    resumeMetadata = fileData;
+    combinedTextContent += `\n--- Resume ---\n${fileText}`;
+  }
+}
+    // 2. Call the AI for structured data extraction
     const extractedData = await extractProfileData(combinedTextContent);
     
     // DEBUGGING: Watch the terminal to see EXACTLY what Llama extracted!
@@ -185,36 +293,87 @@ export const parseDocumentsAndPopulateProfile = async (req, res, next) => {
       return cleaned;
     };
 
+    const updatePayload = {};
+    
+    // Merge Structured Data
+    if (extractedData.personalInfo) updatePayload.personalInfo = { ...profile?.personalInfo?.toObject(), ...removeEmptyFields(extractedData.personalInfo) };
+    if (extractedData.contactInfo) updatePayload.contactInfo = { ...profile?.contactInfo?.toObject(), ...removeEmptyFields(extractedData.contactInfo) };
+    if (extractedData.websitesAndSkills) updatePayload.websitesAndSkills = { ...profile?.websitesAndSkills?.toObject(), ...removeEmptyFields(extractedData.websitesAndSkills) };
+    
+    // For Arrays (History), we overwrite completely if AI found new data
+    if (extractedData.workHistory && extractedData.workHistory.length > 0) updatePayload.workHistory = extractedData.workHistory;
+    if (extractedData.educationHistory && extractedData.educationHistory.length > 0) updatePayload.educationHistory = extractedData.educationHistory;
+    if (extractedData.eeo) updatePayload.eeo = { ...profile?.eeo?.toObject(), ...removeEmptyFields(extractedData.eeo) };
+
+    // 3. Attach the AI Memory Bank (Firebase URLs + Raw Text) to the payload
+    if (resumeMetadata) updatePayload.resume = resumeMetadata;
+    if (cqfoMetadata) updatePayload.cqfo = cqfoMetadata;
+    if (coverLetterMetadata) updatePayload.coverLetter = coverLetterMetadata;
+
+    // 4. Save to Database
     if (!profile) {
-      profile = new Profile({ user: req.user._id, ...extractedData });
+      profile = new Profile({ user: req.user._id, ...updatePayload });
       await profile.save();
     } else {
-      const updatePayload = {};
-      
-      if (extractedData.personalInfo) updatePayload.personalInfo = { ...profile.personalInfo.toObject(), ...removeEmptyFields(extractedData.personalInfo) };
-      if (extractedData.contactInfo) updatePayload.contactInfo = { ...profile.contactInfo.toObject(), ...removeEmptyFields(extractedData.contactInfo) };
-      if (extractedData.websitesAndSkills) updatePayload.websitesAndSkills = { ...profile.websitesAndSkills.toObject(), ...removeEmptyFields(extractedData.websitesAndSkills) };
-      
-      // For Arrays (History), we overwrite completely if AI found new data
-      if (extractedData.workHistory && extractedData.workHistory.length > 0) updatePayload.workHistory = extractedData.workHistory;
-      if (extractedData.educationHistory && extractedData.educationHistory.length > 0) updatePayload.educationHistory = extractedData.educationHistory;
-      
-      if (extractedData.eeo) updatePayload.eeo = { ...profile.eeo.toObject(), ...removeEmptyFields(extractedData.eeo) };
-
       profile = await Profile.findOneAndUpdate(
         { user: req.user._id },
         { $set: updatePayload },
-        { returnDocument: 'after', runValidators: true } // <-- Changed 'new: true' to 'returnDocument: 'after''
+        { returnDocument: 'after', runValidators: true } 
       );
     }
 
     res.status(200).json({ 
-      message: 'Profile successfully autofilled from documents!', 
+      message: 'Documents stored in Firebase, memory bank populated, and profile structured!', 
       profile 
     });
 
   } catch (error) {
     console.error("Document Parsing Error:", error);
+    next(error);
+  }
+};
+
+// @desc    Generate AI answers for unanswered job application questions using Memory Bank
+// @route   POST /api/profile/answer-questions
+export const answerApplicationQuestions = async (req, res, next) => {
+  try {
+    const { targetCompany, targetJobTitle, unansweredQuestions } = req.body;
+
+    // Validate the incoming request from the extension
+    if (!unansweredQuestions || !Array.isArray(unansweredQuestions) || unansweredQuestions.length === 0) {
+      return res.status(400).json({ message: 'No questions provided to answer.' });
+    }
+
+    const profile = await Profile.findOne({ user: req.user._id });
+    if (!profile) {
+      return res.status(404).json({ message: 'Profile not found. Please upload your documents first.' });
+    }
+
+    // Combine the raw text from the AI Memory Bank
+    let aiMemoryBank = "";
+    if (profile.resume?.rawText) aiMemoryBank += `\n--- RESUME ---\n${profile.resume.rawText}`;
+    if (profile.coverLetter?.rawText) aiMemoryBank += `\n--- COVER LETTER ---\n${profile.coverLetter.rawText}`;
+    if (profile.cqfo?.rawText) aiMemoryBank += `\n--- QUESTIONNAIRE ---\n${profile.cqfo.rawText}`;
+
+    if (!aiMemoryBank.trim()) {
+      return res.status(400).json({ message: 'No document context found in your profile to answer these questions.' });
+    }
+
+    // Feed the memory bank and the questions to the new LLM function
+    const answers = await generateFormAnswers(
+      aiMemoryBank,
+      targetCompany || "this company", // Fallbacks just in case the extension couldn't find them on the page
+      targetJobTitle || "this position",
+      unansweredQuestions
+    );
+
+    res.status(200).json({ 
+      message: 'Questions successfully answered by AI!', 
+      answers 
+    });
+
+  } catch (error) {
+    console.error("AI Form Answering Error:", error);
     next(error);
   }
 };

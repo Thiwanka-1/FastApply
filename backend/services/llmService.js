@@ -74,7 +74,7 @@ ${textContext}`;
 // --- HUGGING FACE METHOD (PRODUCTION) ---
 async function callHuggingFace(textContext) {
   const model = process.env.HF_MODEL || "meta-llama/Meta-Llama-3-8B-Instruct";
-  const url = `[https://api-inference.huggingface.co/models/$](https://api-inference.huggingface.co/models/$){model}`;
+  const url = `https://api-inference.huggingface.co/models/${model}`;
   
   const systemPrompt = `You are a strict JSON data extractor. Fill the template exactly. Output RAW JSON ONLY.`;
   const userPrompt = `Template to fill:\n${JSON.stringify(JSON_TEMPLATE, null, 2)}\n\nDocuments:\n${textContext}`;
@@ -95,5 +95,72 @@ export const extractProfileData = async (textContext) => {
   const provider = process.env.LLM_PROVIDER || 'ollama';
   if (provider === 'ollama') return await callOllama(textContext);
   if (provider === 'huggingface') return await callHuggingFace(textContext);
+  throw new Error(`Unsupported LLM provider: ${provider}`);
+};
+
+// ==========================================
+// NEW: HYBRID AGENT - FORM ANSWERING LOGIC
+// ==========================================
+
+async function callOllamaForAnswers(context, company, jobTitle, questions) {
+  const url = `${process.env.OLLAMA_BASE_URL}/api/generate`;
+
+  // Dynamically create an empty JSON template based on the questions asked
+  const answerTemplate = {};
+  questions.forEach(q => answerTemplate[q] = "");
+
+  const prompt = `You are a highly skilled professional applying for the "${jobTitle}" position at "${company}". 
+Read your personal Background Documents below. Then, answer the specific job application questions in the first person ("I", "my").
+Keep answers concise, professional, human-sounding, and directly supported by your experience.
+
+OUTPUT FORMAT: Return ONLY a valid JSON object where the keys are the exact questions provided, and the values are your custom answers.
+
+JSON TEMPLATE TO FILL:
+${JSON.stringify(answerTemplate, null, 2)}
+
+MY BACKGROUND DOCUMENTS:
+${context}`;
+
+  const response = await axios.post(url, {
+    model: process.env.OLLAMA_MODEL || "llama3.1",
+    prompt: prompt,
+    stream: false,
+    options: { 
+      temperature: 0.3, // Slightly higher temperature for more natural, human-like writing
+      num_ctx: 8192 
+    }, 
+    format: "json" 
+  });
+
+  return sanitizeLLMOutput(response.data.response);
+}
+
+async function callHuggingFaceForAnswers(context, company, jobTitle, questions) {
+  const model = process.env.HF_MODEL || "meta-llama/Meta-Llama-3-8B-Instruct";
+  const url = `https://api-inference.huggingface.co/models/${model}`;
+  
+  const answerTemplate = {};
+  questions.forEach(q => answerTemplate[q] = "");
+
+  const systemPrompt = `You are a professional applicant. Answer the questions in the first person based on your documents. Output RAW JSON ONLY.`;
+  const userPrompt = `Job: ${jobTitle} at ${company}\n\nDocuments:\n${context}\n\nFill this JSON template with your answers:\n${JSON.stringify(answerTemplate, null, 2)}`;
+
+  const response = await axios.post(
+    url,
+    {
+      inputs: `<|system|>\n${systemPrompt}\n<|user|>\n${userPrompt}\n<|assistant|>\n`,
+      parameters: { max_new_tokens: 2048, temperature: 0.3, return_full_text: false }
+    },
+    { headers: { Authorization: `Bearer ${process.env.HF_API_KEY}`, 'Content-Type': 'application/json' } }
+  );
+
+  return sanitizeLLMOutput(response.data[0].generated_text);
+}
+
+// Export the new function alongside your existing extractProfileData function
+export const generateFormAnswers = async (context, company, jobTitle, questions) => {
+  const provider = process.env.LLM_PROVIDER || 'ollama';
+  if (provider === 'ollama') return await callOllamaForAnswers(context, company, jobTitle, questions);
+  if (provider === 'huggingface') return await callHuggingFaceForAnswers(context, company, jobTitle, questions);
   throw new Error(`Unsupported LLM provider: ${provider}`);
 };

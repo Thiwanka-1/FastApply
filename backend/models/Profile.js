@@ -82,9 +82,21 @@ const profileSchema = new mongoose.Schema(
       age: { type: String, default: '' },
     },
 
+    // --- AI MEMORY BANK & FILE STORAGE ---
     resume: {
       fileName: { type: String, default: '' },
-      fileUrl: { type: String, default: '' }, // This will hold the AWS/Cloudinary link later
+      fileUrl: { type: String, default: '' }, // Firebase link
+      rawText: { type: String, default: '' }  // AI Context
+    },
+    cqfo: {
+      fileName: { type: String, default: '' },
+      fileUrl: { type: String, default: '' }, // Firebase link
+      rawText: { type: String, default: '' }  // AI Context
+    },
+    coverLetter: {
+      fileName: { type: String, default: '' },
+      fileUrl: { type: String, default: '' }, // Firebase link
+      rawText: { type: String, default: '' }  // AI Context
     }
   },
   { timestamps: true }

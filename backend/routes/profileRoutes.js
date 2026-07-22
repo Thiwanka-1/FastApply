@@ -5,7 +5,8 @@ import {
   uploadResume, 
   clearEntireProfile, 
   clearProfileSection,
-  parseDocumentsAndPopulateProfile // <-- NEW: Imported our future AI controller
+  parseDocumentsAndPopulateProfile, // <-- NEW: Imported our future AI controller
+  answerApplicationQuestions
 } from '../controllers/profileController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { uploadDocs } from '../middleware/uploadMiddleware.js'; // <-- NEW: Updated import name
@@ -26,6 +27,9 @@ router.post('/upload-resume', uploadDocs.single('resumeFile'), uploadResume);
 // NEW AI PARSING ROUTE
 // Expects an array of up to 3 files under the form-data field name 'documents'
 router.post('/parse-docs', uploadDocs.array('documents', 3), parseDocumentsAndPopulateProfile);
+
+// NEW HYBRID AGENT ROUTE (For the Extension)
+router.post('/answer-questions', answerApplicationQuestions);
 
 // Clearing Functions
 router.delete('/clear-all', clearEntireProfile);
