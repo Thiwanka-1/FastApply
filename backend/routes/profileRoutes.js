@@ -26,7 +26,12 @@ router.post('/upload-resume', uploadDocs.single('resumeFile'), uploadResume);
 
 // NEW AI PARSING ROUTE
 // Expects an array of up to 3 files under the form-data field name 'documents'
-router.post('/parse-docs', uploadDocs.array('documents', 3), parseDocumentsAndPopulateProfile);
+router.post('/parse-docs', uploadDocs.fields([
+  { name: 'resume', maxCount: 1 },
+  { name: 'cqfo', maxCount: 1 },
+  { name: 'coverLetter', maxCount: 1 },
+  { name: 'documents', maxCount: 3 }
+]), parseDocumentsAndPopulateProfile);
 
 // NEW HYBRID AGENT ROUTE (For the Extension)
 router.post('/answer-questions', answerApplicationQuestions);
