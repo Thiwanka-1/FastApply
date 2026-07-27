@@ -7,6 +7,8 @@ import connectDB from './config/db.js';
 import authRoutes from './routes/authRoutes.js';
 import profileRoutes from './routes/profileRoutes.js';
 import analyticsRoutes from './routes/analyticsRoutes.js'; // <-- ADD THIS
+import applicationRoutes from './routes/applicationRoutes.js';
+import aiUsageRoutes from './routes/aiUsageRoutes.js';
 // Load environment variables from .env file
 dotenv.config();
 
@@ -41,6 +43,9 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/analytics', analyticsRoutes); // <-- ADD THIS
+app.use('/api/applications', applicationRoutes);
+app.use('/api/ai-usage', aiUsageRoutes);
+
 // --- Global Error Handler ---
 // This prevents the server from crashing and sends clean errors to the frontend
 app.use((err, req, res, next) => {

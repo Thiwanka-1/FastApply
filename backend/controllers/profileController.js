@@ -4,6 +4,8 @@ import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebas
 import mammoth from 'mammoth';
 import { PDFParse } from 'pdf-parse';
 import { extractProfileData, generateFormAnswers } from '../services/llmService.js';
+import Application from '../models/Application.js';
+import AIUsageLog from '../models/AIUsageLog.js';
 
 // import { createRequire } from 'module';
 // const require = createRequire(import.meta.url);
@@ -784,7 +786,16 @@ const postProcessExtractedProfile = (profileData, documents) => {
     cqfoText
   );
 
-  let answers = enrichAuthorizationMemory(profileData, cqfoText);
+  profileData.eeo.disability = normalizeDisabilityStatus(
+    profileData.eeo.disability
+  );
+
+  profileData.eeo.age = cleanAgeValue(profileData.eeo.age);
+
+  let answers = canonicalizeApplicationMemory(
+    profileData,
+    cqfoText
+  );
 
   const storedVeteranAnswer = findMemoryAnswer(
     answers,
@@ -826,19 +837,12 @@ const postProcessExtractedProfile = (profileData, documents) => {
       key: 'race',
       question: 'Race',
       answer: profileData.eeo.race,
-      aliases: MEMORY_ALIASES.race || [
-        'racial background',
-        'race category'
-      ],
+      aliases: MEMORY_ALIASES.race,
       source: 'cqfo',
       sensitive: true,
       confidence: 1
     });
   }
-
-  profileData.workHistory = correctEmploymentTypes(
-    profileData.workHistory
-  );
 
   const interviewAvailability = findMemoryAnswer(
     answers,
@@ -851,14 +855,230 @@ const postProcessExtractedProfile = (profileData, documents) => {
     );
   }
 
-  answers = addMemoryAliases(answers);
+  profileData.workHistory = correctEmploymentTypes(
+    profileData.workHistory
+  );
+
+  profileData.educationHistory = refineEducationHistory(
+    profileData.educationHistory,
+    documents
+  );
 
   profileData.applicationMemory = {
     ...profileData.applicationMemory,
-    answers
+    answers: addMemoryAliases(answers)
   };
 
   return profileData;
+};
+
+const MEMORY_KEY_MAP = {
+  telephoneAvailability: 'telephoneAccessible24Hours',
+  discontinueIfDobMandated: 'stopApplicationIfDobRequired',
+  relocationStatus: 'willingToRelocate',
+  workTimeAvailability: 'eveningsWeekendsAvailable',
+  citizenshipStatus: 'otherCitizenshipOrResidency',
+  citizenshipDetails: 'canadaWorkAuthorizationDetails',
+  salaryNotes: 'salaryNegotiationNotes',
+  governmentEmploymentUSA: 'governmentEmployment',
+  employmentAgreements: 'employmentAgreement'
+};
+
+const DEGREE_REFINEMENTS = [
+  { pattern: /\bBachelor of Engineering\b/i, value: 'Bachelor of Engineering' },
+  { pattern: /\bBachelor of Technology\b/i, value: 'Bachelor of Technology' },
+  { pattern: /\bBachelor of Science\b/i, value: 'Bachelor of Science' },
+  { pattern: /\bBachelor of Arts\b/i, value: 'Bachelor of Arts' },
+  { pattern: /\bMaster of Engineering\b/i, value: 'Master of Engineering' },
+  { pattern: /\bMaster of Science\b/i, value: 'Master of Science' },
+  { pattern: /\bMaster of Arts\b/i, value: 'Master of Arts' },
+  { pattern: /\bMaster of Business Administration\b/i, value: 'Master of Business Administration' },
+  { pattern: /\bDoctor of Philosophy\b/i, value: 'Doctor of Philosophy' }
+];
+
+const normalizeDisabilityStatus = (value) => {
+  const text = cleanText(value).toLowerCase();
+
+  if (!text) return '';
+  if (text === 'no' || text.includes("don't have") || text.includes('do not have')) {
+    return "No, I don't have a disability";
+  }
+
+  if (text === 'yes' || text.includes('have a disability')) {
+    return 'Yes, I have a disability';
+  }
+
+  return cleanText(value);
+};
+
+const cleanAgeValue = (value) => {
+  const text = cleanText(value);
+
+  if (
+    /^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$/.test(text) ||
+    /^\d{4}-\d{1,2}-\d{1,2}$/.test(text)
+  ) {
+    return '';
+  }
+
+  return /^\d{1,3}$/.test(text) ? text : '';
+};
+
+const parseSalaryRange = (value) => {
+  const text = cleanText(value);
+  const match = text.match(
+    /([\d,]+(?:\.\d+)?)\s*(?:-|to)\s*([\d,]+(?:\.\d+)?)\s*([A-Za-z]{3})?/i
+  );
+
+  if (!match) return null;
+
+  return {
+    minimum: match[1].replace(/,/g, ''),
+    maximum: match[2].replace(/,/g, ''),
+    currency: cleanText(match[3]).toUpperCase()
+  };
+};
+
+const refineEducationHistory = (history, documents) => {
+  if (!Array.isArray(history)) return [];
+
+  const documentText = [
+    documents?.resume || '',
+    documents?.cqfo || '',
+    documents?.coverLetter || ''
+  ].join('\n');
+
+  return history.map(item => {
+    let degree = cleanText(item.degree);
+
+    if (/^(bachelor|master|associate|doctor)(?:'s)? degree$/i.test(degree)) {
+      const refinement = DEGREE_REFINEMENTS.find(entry => {
+        return entry.pattern.test(documentText);
+      });
+
+      if (refinement) degree = refinement.value;
+    }
+
+    return {
+      ...item,
+      degree
+    };
+  });
+};
+
+const canonicalizeApplicationMemory = (profileData, cqfoText) => {
+  const enrichedAnswers = enrichAuthorizationMemory(profileData, cqfoText);
+
+  // Legacy keys are processed first. Canonical keys then replace them.
+  const orderedAnswers = [...enrichedAnswers].sort((first, second) => {
+    const firstLegacy = MEMORY_KEY_MAP[first.key] ? 0 : 1;
+    const secondLegacy = MEMORY_KEY_MAP[second.key] ? 0 : 1;
+    return firstLegacy - secondLegacy;
+  });
+
+  const canonicalAnswers = [];
+
+  orderedAnswers.forEach(item => {
+    if (!item?.key) return;
+
+    if (item.key === 'salaryRange') {
+      const range = parseSalaryRange(item.answer);
+
+      if (range) {
+        upsertMemoryAnswer(canonicalAnswers, {
+          key: 'salaryMinimum',
+          question: 'Minimum expected annual base salary',
+          answer: range.minimum,
+          source: 'cqfo',
+          sensitive: true,
+          confidence: item.confidence || 1
+        });
+
+        upsertMemoryAnswer(canonicalAnswers, {
+          key: 'salaryMaximum',
+          question: 'Maximum expected annual base salary',
+          answer: range.maximum,
+          source: 'cqfo',
+          sensitive: true,
+          confidence: item.confidence || 1
+        });
+
+        if (range.currency) {
+          upsertMemoryAnswer(canonicalAnswers, {
+            key: 'salaryCurrency',
+            question: 'Expected salary currency',
+            answer: range.currency,
+            source: 'cqfo',
+            sensitive: true,
+            confidence: item.confidence || 1
+          });
+        }
+      }
+
+      return;
+    }
+
+    const canonicalKey = MEMORY_KEY_MAP[item.key] || item.key;
+    let answer = item.answer;
+
+    if (
+      canonicalKey === 'otherCitizenshipOrResidency' ||
+      canonicalKey === 'authorizedToWorkUSA' ||
+      canonicalKey === 'authorizedToWorkCanada' ||
+      canonicalKey === 'requiresCanadaSponsorship' ||
+      canonicalKey === 'sponsorshipRequired'
+    ) {
+      answer = normalizeYesNo(answer);
+    }
+
+    upsertMemoryAnswer(canonicalAnswers, {
+      ...item,
+      key: canonicalKey,
+      answer
+    });
+  });
+
+  const canadaDetails =
+    cleanText(findMemoryAnswer(canonicalAnswers, 'canadaWorkAuthorizationDetails')?.answer) ||
+    cleanText(findMemoryAnswer(canonicalAnswers, 'sponsorshipDetails')?.answer);
+
+  if (/do not have.*canada work authorization|no work authorization.*canada/i.test(canadaDetails)) {
+    upsertMemoryAnswer(canonicalAnswers, {
+      key: 'authorizedToWorkCanada',
+      question: 'Are you legally authorized to work in Canada?',
+      answer: 'No',
+      source: 'cqfo',
+      sensitive: true,
+      confidence: 1
+    });
+  }
+
+  if (/sponsorship|work permit/i.test(canadaDetails)) {
+    upsertMemoryAnswer(canonicalAnswers, {
+      key: 'requiresCanadaSponsorship',
+      question: 'Will you require employer sponsorship to work in Canada?',
+      answer: 'Yes',
+      source: 'cqfo',
+      sensitive: true,
+      confidence: 1
+    });
+  }
+
+  if (
+    normalizeYesNo(profileData.eeo.authorizedToWork) === 'Yes' &&
+    /legally authorized to work in the USA/i.test(cqfoText)
+  ) {
+    upsertMemoryAnswer(canonicalAnswers, {
+      key: 'authorizedToWorkUSA',
+      question: 'Are you legally authorized to work in the United States?',
+      answer: 'Yes',
+      source: 'cqfo',
+      sensitive: true,
+      confidence: 1
+    });
+  }
+
+  return canonicalAnswers;
 };
 
 const limitContextText = (value, maxLength) => {
@@ -953,35 +1173,321 @@ const normalizeGpaFields = (item) => {
 };
 
 
-const validateExtractedProfile = (profileData, documentText, usedCqfoVision) => {
+const validateExtractedProfile = (
+  profileData,
+  documentText,
+  usedCqfoVision
+) => {
   const errors = [];
+  const resumeText = documentText.resume || '';
+  const cqfoText = documentText.cqfo || '';
 
-  if (documentText.resume.trim() && profileData.workHistory.length === 0) {
+  if (resumeText.trim() && profileData.workHistory.length === 0) {
     errors.push('No work history was extracted from the resume.');
   }
 
   if (
-    documentText.resume.toLowerCase().includes('education') &&
+    /education/i.test(resumeText) &&
     profileData.educationHistory.length === 0
   ) {
     errors.push('No education history was extracted.');
   }
 
   if (
-    usedCqfoVision &&
-    profileData.applicationMemory.answers.length < 5
+    !profileData.personalInfo.firstName &&
+    !profileData.personalInfo.lastName
   ) {
-    errors.push('The CQFO visual extraction returned too few reusable answers.');
-  }
-
-  if (!profileData.personalInfo.firstName && !profileData.personalInfo.lastName) {
     errors.push('The candidate name was not extracted.');
   }
 
+  if (usedCqfoVision) {
+    const memoryKeys = new Set(
+      profileData.applicationMemory.answers.map(item => {
+        return cleanText(item.key)
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, '');
+      })
+    );
+
+    const requireKey = (condition, key, label) => {
+      const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+      if (condition && !memoryKeys.has(normalizedKey)) {
+        errors.push(`${label} was not extracted from the CQFO.`);
+      }
+    };
+
+    requireKey(
+      /expected base salary/i.test(cqfoText),
+      'salaryMinimum',
+      'Minimum salary'
+    );
+
+    requireKey(
+      /expected base salary/i.test(cqfoText),
+      'salaryMaximum',
+      'Maximum salary'
+    );
+
+    requireKey(
+      /expected base salary/i.test(cqfoText),
+      'salaryCurrency',
+      'Salary currency'
+    );
+
+    requireKey(
+      /citizen of another country|permanent residency/i.test(cqfoText),
+      'otherCitizenshipOrResidency',
+      'Citizenship or permanent-residency answer'
+    );
+
+    requireKey(
+      /legally authorized to work in the USA/i.test(cqfoText),
+      'authorizedToWorkUSA',
+      'United States work authorization'
+    );
+
+    requireKey(
+      /government entity/i.test(cqfoText),
+      'governmentEmployment',
+      'Government-employment answer'
+    );
+
+    requireKey(
+      /agreement or covenant not to compete/i.test(cqfoText),
+      'employmentAgreement',
+      'Employment-agreement answer'
+    );
+
+    requireKey(
+      /convicted of|pled guilty/i.test(cqfoText),
+      'criminalHistory',
+      'Criminal-history answer'
+    );
+
+    requireKey(
+      /dates and time ranges.*interview/i.test(cqfoText),
+      'interviewAvailability',
+      'Interview availability'
+    );
+
+    const referenceMatches = cqfoText.match(/\*?Reference\s*0?\d+/gi) || [];
+    const referenceCount = Math.min(new Set(referenceMatches.map(item => {
+      return item.toLowerCase().replace(/[^0-9]/g, '');
+    })).size, 3);
+
+    for (let index = 1; index <= referenceCount; index++) {
+      requireKey(
+        true,
+        `reference${index}FullName`,
+        `Reference ${index} full name`
+      );
+
+      requireKey(
+        true,
+        `reference${index}Phone`,
+        `Reference ${index} phone`
+      );
+    }
+
+    const certificationMatches =
+      cqfoText.match(/License\/Certification name/gi) || [];
+
+    for (
+      let index = 1;
+      index <= Math.min(certificationMatches.length, 5);
+      index++
+    ) {
+      requireKey(
+        true,
+        `certification${index}Name`,
+        `Certification ${index} name`
+      );
+
+      requireKey(
+        true,
+        `certification${index}Issuer`,
+        `Certification ${index} issuer`
+      );
+    }
+  }
+
   if (errors.length > 0) {
-    throw new Error(`Document extraction validation failed: ${errors.join(' ')}`);
+    throw new Error(
+      `Document extraction validation failed: ${errors.join(' ')}`
+    );
   }
 };
+
+const hasApplicationValue = value => {
+  if (Array.isArray(value)) return value.length > 0;
+
+  return value !== '' &&
+    value !== null &&
+    value !== undefined;
+};
+
+const getWritingRuntimeInfo = () => {
+  const provider = (
+    process.env.LLM_PROVIDER || 'ollama'
+  ).trim().toLowerCase();
+
+  if (provider === 'ollama') {
+    return {
+      provider: 'ollama',
+      model:
+        process.env.OLLAMA_WRITING_MODEL ||
+        process.env.OLLAMA_MODEL ||
+        'llama3.1'
+    };
+  }
+
+  return {
+    provider: 'huggingface',
+    model:
+      process.env.HF_WRITING_MODEL ||
+      process.env.HF_EXTRACTION_MODEL ||
+      process.env.HF_MODEL ||
+      'openai/gpt-oss-120b'
+  };
+};
+
+const normalizeGeneratedAnswers = (result, fields) => {
+  const sourceValues = [
+    'profile',
+    'applicationMemory',
+    'documents',
+    'generated',
+    'unknown'
+  ];
+
+  const rawAnswers = Array.isArray(result?.answers)
+    ? result.answers
+    : [];
+
+  const answerMap = new Map();
+
+  rawAnswers.forEach(answer => {
+    if (answer?.fieldId) {
+      answerMap.set(answer.fieldId, answer);
+    }
+  });
+
+  return fields.map(field => {
+    const answer = answerMap.get(field.fieldId) || {};
+    const value = answer.value ?? '';
+    const confidence = Math.min(
+      1,
+      Math.max(0, Number(answer.confidence) || 0)
+    );
+
+    return {
+      fieldId: field.fieldId,
+      label: field.label,
+      value,
+      source: sourceValues.includes(answer.source)
+        ? answer.source
+        : 'unknown',
+      confidence,
+      requiresReview:
+        answer.requiresReview !== false ||
+        !hasApplicationValue(value),
+      reviewReason: cleanText(answer.reviewReason)
+    };
+  });
+};
+
+const getApplicationMemoryValue = (answers, key) => {
+  const wantedKey = normalizeMemoryKey(key);
+
+  const match = (answers || []).find(item => {
+    return normalizeMemoryKey(item.key) === wantedKey;
+  });
+
+  return cleanText(match?.answer);
+};
+
+const inferJobCountry = jobContext => {
+  const text = [
+    jobContext?.location,
+    jobContext?.description,
+    jobContext?.jobUrl
+  ].join(' ').toLowerCase();
+
+  if (
+    /\bcanada\b|\bcanadian\b|\bvancouver\b|\btoronto\b|\bmontreal\b|\bcalgary\b|\bottawa\b|\bbc\b|\bontario\b|\balberta\b/i.test(
+      text
+    )
+  ) {
+    return 'Canada';
+  }
+
+  if (
+    /\bunited states\b|\busa\b|\bu\.s\.a?\b|\bcalifornia\b|\btexas\b|\bnew york\b/i.test(
+      text
+    )
+  ) {
+    return 'United States';
+  }
+
+  return '';
+};
+
+const applyAnswerReviewRules = ({
+  answers,
+  fields,
+  jobContext,
+  applicationMemory
+}) => {
+  const fieldMap = new Map(
+    fields.map(field => [field.fieldId, field])
+  );
+
+  const jobCountry = inferJobCountry(jobContext);
+  const storedSalaryCurrency = getApplicationMemoryValue(
+    applicationMemory,
+    'salaryCurrency'
+  ).toUpperCase();
+
+  return answers.map(answer => {
+    const field = fieldMap.get(answer.fieldId);
+    const label = cleanText(field?.label).toLowerCase();
+
+    const isSalaryField =
+      /\bsalary\b|\bcompensation\b|\bpay range\b/.test(label);
+
+    if (!isSalaryField || !hasApplicationValue(answer.value)) {
+      return {
+        ...answer,
+        reviewReason: ''
+      };
+    }
+
+    const currencyMismatch =
+      (jobCountry === 'Canada' && storedSalaryCurrency === 'USD') ||
+      (
+        jobCountry === 'United States' &&
+        storedSalaryCurrency === 'CAD'
+      );
+
+    if (!currencyMismatch) {
+      return {
+        ...answer,
+        reviewReason: ''
+      };
+    }
+
+    return {
+      ...answer,
+      confidence: Math.min(answer.confidence, 0.9),
+      requiresReview: true,
+      reviewReason:
+        `Stored salary currency is ${storedSalaryCurrency}, but the job appears to be in ${jobCountry}.`
+    };
+  });
+};
+
+
 
 // @desc    Get current user's profile
 // @route   GET /api/profile
@@ -1283,26 +1789,37 @@ export const parseDocumentsAndPopulateProfile = async (req, res, next) => {
   }
 };
 
-// @desc    Answer unresolved application fields using profile, memory and job context
+// @desc    Answer unresolved application fields
 // @route   POST /api/profile/answer-questions
 export const answerApplicationQuestions = async (req, res, next) => {
+  const startedAt = Date.now();
+  const runtime = getWritingRuntimeInfo();
+
+  let application = null;
+  let inputCharacters = 0;
+
   try {
     let incomingFields = req.body.fields;
 
-    // Temporary support for the previous request format
-    if (!Array.isArray(incomingFields) && Array.isArray(req.body.unansweredQuestions)) {
+    if (
+      !Array.isArray(incomingFields) &&
+      Array.isArray(req.body.unansweredQuestions)
+    ) {
       incomingFields = req.body.unansweredQuestions;
     }
 
-    const fields = normalizeApplicationFields(incomingFields);
+    const fields = normalizeApplicationFields(incomingFields)
+      .filter(field => !hasApplicationValue(field.currentValue));
 
     if (fields.length === 0) {
       return res.status(400).json({
-        message: 'No valid unresolved application fields were provided.'
+        message: 'No unresolved application fields were provided.'
       });
     }
 
-    const profile = await Profile.findOne({ user: req.user._id });
+    const profile = await Profile.findOne({
+      user: req.user._id
+    });
 
     if (!profile) {
       return res.status(404).json({
@@ -1310,8 +1827,43 @@ export const answerApplicationQuestions = async (req, res, next) => {
       });
     }
 
-    const profileData = profile.toObject();
     const jobContext = normalizeJobContext(req.body);
+    const applicationId = cleanText(req.body.applicationId);
+
+    if (applicationId && !/^[a-f\d]{24}$/i.test(applicationId)) {
+      return res.status(400).json({
+        message: 'Invalid application ID.'
+      });
+    }
+
+    if (applicationId) {
+      application = await Application.findOne({
+        _id: applicationId,
+        user: req.user._id
+      });
+
+      if (!application) {
+        return res.status(404).json({
+          message: 'Application not found.'
+        });
+      }
+
+      application.jobContext = jobContext;
+      application.fields = fields;
+      application.status = 'analysing';
+      application.errorMessage = '';
+      await application.save();
+    } else {
+      application = await Application.create({
+        user: req.user._id,
+        atsPlatform: cleanText(req.body.atsPlatform) || 'generic',
+        jobContext,
+        fields,
+        status: 'analysing'
+      });
+    }
+
+    const profileData = profile.toObject();
 
     const candidateContext = {
       profile: {
@@ -1323,35 +1875,41 @@ export const answerApplicationQuestions = async (req, res, next) => {
         eeo: profileData.eeo
       },
 
-      applicationMemory: profileData.applicationMemory?.answers || [],
+      applicationMemory:
+        profileData.applicationMemory?.answers || [],
 
       documents: {
         resume: {
           fileName: profileData.resume?.fileName || '',
-          rawText: limitContextText(profileData.resume?.rawText, 35000)
+          rawText: limitContextText(
+            profileData.resume?.rawText,
+            35000
+          )
         },
+
         cqfo: {
           fileName: profileData.cqfo?.fileName || '',
-          rawText: limitContextText(profileData.cqfo?.rawText, 30000)
+          rawText: limitContextText(
+            profileData.cqfo?.rawText,
+            30000
+          )
         },
+
         coverLetter: {
           fileName: profileData.coverLetter?.fileName || '',
-          rawText: limitContextText(profileData.coverLetter?.rawText, 20000)
+          rawText: limitContextText(
+            profileData.coverLetter?.rawText,
+            20000
+          )
         }
       }
     };
 
-    const hasCandidateContext =
-      candidateContext.documents.resume.rawText ||
-      candidateContext.documents.cqfo.rawText ||
-      candidateContext.documents.coverLetter.rawText ||
-      candidateContext.applicationMemory.length > 0;
-
-    if (!hasCandidateContext) {
-      return res.status(400).json({
-        message: 'No profile or document context is available for this client.'
-      });
-    }
+    inputCharacters = JSON.stringify({
+      candidateContext,
+      jobContext,
+      fields
+    }).length;
 
     const result = await generateFormAnswers({
       candidateContext,
@@ -1359,16 +1917,96 @@ export const answerApplicationQuestions = async (req, res, next) => {
       fields
     });
 
-    const answers = Array.isArray(result?.answers) ? result.answers : [];
+    let answers = normalizeGeneratedAnswers(
+      result,
+      fields
+    );
+
+    answers = applyAnswerReviewRules({
+      answers,
+      fields,
+      jobContext,
+      applicationMemory:
+        profileData.applicationMemory?.answers || []
+    });
+
+    const aiFilled = answers.filter(answer => {
+      return hasApplicationValue(answer.value);
+    }).length;
+
+    const unresolved = answers.length - aiFilled;
+
+    application.answers = answers;
+    application.status = 'ready_for_review';
+    application.errorMessage = '';
+
+    application.stats = {
+      totalFields: Number(req.body.scriptStats?.totalFields) ||
+        fields.length,
+      scriptFilled: Number(req.body.scriptStats?.scriptFilled) || 0,
+      aiFilled,
+      unresolved
+    };
+
+    await application.save();
+
+    await AIUsageLog.create({
+      user: req.user._id,
+      application: application._id,
+      task: 'form_answers',
+      provider: runtime.provider,
+      model: runtime.model,
+      inputCharacters,
+      outputCharacters: JSON.stringify(result).length,
+      durationMs: Date.now() - startedAt,
+      success: true
+    });
 
     res.status(200).json({
       message: 'Application fields analysed successfully.',
+      applicationId: application._id,
+      status: application.status,
       jobContext,
       requestedFields: fields.length,
-      answeredFields: answers.filter(item => item.value !== '' && item.value !== null).length,
+      answeredFields: aiFilled,
+      unresolvedFields: unresolved,
       answers
     });
   } catch (error) {
+    if (application) {
+      application.status = 'failed';
+      application.errorMessage = error.message;
+
+      try {
+        await application.save();
+      } catch (saveError) {
+        console.error(
+          'Could not save failed application:',
+          saveError.message
+        );
+      }
+    }
+
+    try {
+      await AIUsageLog.create({
+        user: req.user._id,
+        application: application?._id || null,
+        task: 'form_answers',
+        provider: runtime.provider,
+        model: runtime.model,
+        inputCharacters,
+        outputCharacters: 0,
+        durationMs: Date.now() - startedAt,
+        success: false,
+        errorMessage: error.message
+      });
+    } catch (logError) {
+      console.error(
+        'Could not save AI usage log:',
+        logError.message
+      );
+    }
+
     console.error('AI Form Answering Error:', error);
     next(error);
   }

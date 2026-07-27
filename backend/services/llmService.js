@@ -103,19 +103,24 @@ const APPLICATION_MEMORY_TEMPLATE = {
   }]
 };
 
-const CQFO_VISUAL_TEMPLATE = {
+const MEMORY_ANSWER_TEMPLATE = {
+  key: '',
+  question: '',
+  answer: '',
+  answerType: 'text',
+  aliases: [],
+  source: 'cqfo',
+  sensitive: false,
+  confidence: 1
+};
+
+const CQFO_PERSONAL_TEMPLATE = {
   personalInfo: {
     firstName: '',
-    lastName: '',
-    languages: [{
-      language: '',
-      proficiency: '',
-      fluent: false
-    }]
+    lastName: ''
   },
 
   contactInfo: {
-    email: '',
     phone: '',
     addressLine1: '',
     addressLine2: '',
@@ -125,6 +130,42 @@ const CQFO_VISUAL_TEMPLATE = {
     postalCode: ''
   },
 
+  eeo: {
+    optOut: false,
+    disability: '',
+    veteran: '',
+    gender: '',
+    ethnicity: '',
+    race: '',
+    age: ''
+  },
+
+  applicationMemory: {
+    answers: [MEMORY_ANSWER_TEMPLATE]
+  }
+};
+
+const CQFO_APPLICATION_TEMPLATE = {
+  personalInfo: {
+    languages: [{
+      language: '',
+      proficiency: '',
+      fluent: false
+    }]
+  },
+
+  eeo: {
+    authorizedToWork: '',
+    requireVisaNow: '',
+    requireVisaFuture: ''
+  },
+
+  applicationMemory: {
+    answers: [MEMORY_ANSWER_TEMPLATE]
+  }
+};
+
+const CQFO_CREDENTIALS_TEMPLATE = {
   educationHistory: [{
     school: '',
     institutionLocation: '',
@@ -137,33 +178,140 @@ const CQFO_VISUAL_TEMPLATE = {
     endDate: ''
   }],
 
-  eeo: {
-    optOut: false,
-    authorizedToWork: '',
-    requireVisaNow: '',
-    requireVisaFuture: '',
-    disability: '',
-    veteran: '',
-    gender: '',
-    ethnicity: '',
-    race: '',
-    age: ''
-  },
-
   applicationMemory: {
-    answers: [{
-      key: '',
-      question: '',
-      answer: '',
-      answerType: 'text',
-      aliases: [],
-      source: 'cqfo',
-      sensitive: false,
-      confidence: 1
-    }]
+    answers: [MEMORY_ANSWER_TEMPLATE]
   }
 };
 
+const CQFO_VISION_BATCHES = [
+  {
+    name: 'cqfo_personal_eeo',
+    pages: [1, 2],
+    template: CQFO_PERSONAL_TEMPLATE,
+    focus: `
+Extract personal details, contact details, gender, date of birth, ethnicity,
+race, disability, veteran status, travel percentage and telephone availability.
+`
+  },
+  {
+    name: 'cqfo_application_details',
+    pages: [3, 4],
+    template: CQFO_APPLICATION_TEMPLATE,
+    focus: `
+Extract languages, nationality, citizenship, relocation, travel flexibility,
+work-time availability, salary, US/Canada work authorization, sponsorship,
+sponsorship details and every professional reference field.
+`
+  },
+  {
+    name: 'cqfo_credentials_legal',
+    pages: [5, 6],
+    template: CQFO_CREDENTIALS_TEMPLATE,
+    focus: `
+Extract every certification, education entry, government employment,
+employment agreements, criminal-history answers and interview availability.
+`
+  }
+];
+
+const CQFO_RECOVERY_FIELDS = {
+  otherCitizenshipOrResidency: {
+    question: 'Are you a citizen of another country or hold permanent residency status?',
+    description: 'Return only Yes or No.',
+    sensitive: true
+  },
+
+  salaryMinimum: {
+    question: 'Minimum expected annual base salary',
+    description: 'Return digits only, without commas or currency symbols.',
+    sensitive: true
+  },
+
+  salaryMaximum: {
+    question: 'Maximum expected annual base salary',
+    description: 'Return digits only, without commas or currency symbols.',
+    sensitive: true
+  },
+
+  salaryCurrency: {
+    question: 'Expected salary currency',
+    description: 'Return the three-letter currency code, such as USD or CAD.',
+    sensitive: true
+  },
+
+  salaryNegotiationNotes: {
+    question: 'Additional salary negotiation notes',
+    description: 'Return the exact entered note.',
+    sensitive: true
+  },
+
+  authorizedToWorkUSA: {
+    question: 'Are you legally authorized to work in the United States?',
+    description: 'Return only Yes or No.',
+    sensitive: true
+  },
+
+  sponsorshipRequired: {
+    question: 'Will you now or in the future require employment sponsorship?',
+    description: 'Return only Yes or No.',
+    sensitive: true
+  },
+
+  sponsorshipDetails: {
+    question: 'Employment sponsorship details',
+    description: 'Return the exact entered details.',
+    sensitive: true
+  },
+
+  canadaWorkAuthorizationDetails: {
+    question: 'Canada work authorization details',
+    description: 'Return the exact entered details.',
+    sensitive: true
+  },
+
+  governmentEmployment: {
+    question: 'Have you been employed by a government entity in the last three years?',
+    description: 'Return only Yes or No.',
+    sensitive: true
+  },
+
+  employmentAgreement: {
+    question: 'Are you subject to a non-compete, non-solicitation or similar agreement?',
+    description: 'Return only Yes or No.',
+    sensitive: true
+  },
+
+  criminalHistory: {
+    question: 'Do you have the criminal-history condition described in the questionnaire?',
+    description: 'Return only Yes or No.',
+    sensitive: true
+  },
+
+  interviewAvailability: {
+    question: 'Interview availability',
+    description: 'Return all entered interview dates or time ranges.',
+    sensitive: false
+  }
+};
+
+const CQFO_APPLICATION_RECOVERY_KEYS = [
+  'otherCitizenshipOrResidency',
+  'salaryMinimum',
+  'salaryMaximum',
+  'salaryCurrency',
+  'salaryNegotiationNotes',
+  'authorizedToWorkUSA',
+  'sponsorshipRequired',
+  'sponsorshipDetails',
+  'canadaWorkAuthorizationDetails'
+];
+
+const CQFO_LEGAL_RECOVERY_KEYS = [
+  'governmentEmployment',
+  'employmentAgreement',
+  'criminalHistory',
+  'interviewAvailability'
+];
 // ======================================================
 // GENERAL HELPERS
 // ======================================================
@@ -336,51 +484,56 @@ const runCqfoVisionExtraction = async (cqfoText, cqfoImages) => {
     );
   }
 
-  const prompts = buildCqfoVisionPrompts(cqfoText, cqfoImages);
+  const model = getHuggingFaceVisionModel();
+  const results = [];
 
-  const configuredModel = getHuggingFaceVisionModel();
+  for (const batch of CQFO_VISION_BATCHES) {
+    const batchImages = cqfoImages.filter(image => {
+      return batch.pages.includes(image.pageNumber);
+    });
 
-  const candidateModels = [
-    configuredModel,
-    'zai-org/GLM-4.5V:novita',
-    'zai-org/GLM-4.5V:zai-org'
-  ].filter((model, index, models) => models.indexOf(model) === index);
-
-  let lastError;
-
-  for (const model of candidateModels) {
-    try {
-      console.log(`Trying CQFO vision model: ${model}`);
-
-      return await makeHuggingFaceRequest({
-        task: 'extraction',
-        ...prompts,
-        modelOverride: model,
-        maxTokensOverride: getPositiveInteger(
-          process.env.HF_VISION_MAX_TOKENS,
-          8000
-        ),
-        reasoningEffortOverride: process.env.HF_VISION_REASONING || 'low',
-        temperature: 0,
-        responseSchema: null,
-        schemaName: 'cqfo_visual'
-      });
-    } catch (error) {
-      lastError = error;
-
-      if (!isUnsupportedModelError(error)) {
-        throw error;
-      }
-
-      console.warn(`Vision model unavailable: ${model}`);
+    if (batchImages.length === 0) {
+      throw new Error(
+        `Missing rendered CQFO images for pages ${batch.pages.join(', ')}.`
+      );
     }
+
+    const prompts = buildCqfoVisionPrompts(
+      cqfoText,
+      batchImages,
+      batch
+    );
+
+    console.log(
+      `Extracting ${batch.name} from CQFO pages ${batch.pages.join(', ')}`
+    );
+
+    const result = await makeHuggingFaceRequest({
+      task: 'extraction',
+      ...prompts,
+      modelOverride: model,
+      maxTokensOverride: getPositiveInteger(
+        process.env.HF_VISION_BATCH_MAX_TOKENS,
+        4500
+      ),
+      reasoningEffortOverride:
+        process.env.HF_VISION_REASONING || 'low',
+      temperature: 0,
+      responseSchema: null,
+      schemaName: batch.name
+    });
+
+    results.push(result);
   }
 
-  throw new Error(
-    `No configured Hugging Face vision model is available. ` +
-    `Enable Novita or Z.ai in Hugging Face Inference Providers. ` +
-    `Last error: ${lastError?.message || 'Unknown error'}`
-  );
+  const mergedResult = mergeCqfoVisionResults(results);
+
+  return await recoverMissingCqfoFields({
+    cqfoText,
+    cqfoImages,
+    visionResult: mergedResult,
+    model
+  });
 };
 
 
@@ -544,6 +697,25 @@ const mergeEducationHistories = (coreHistory = [], visualHistory = []) => {
 
   return mergedHistory;
 };
+
+const splitCqfoTextByPage = (text) => {
+  if (typeof text !== 'string' || !text.trim()) return [];
+
+  return text
+    .split(/\n\s*--\s*\d+\s+of\s+\d+\s*--\s*\n/i)
+    .map(page => page.trim())
+    .filter(Boolean);
+};
+
+const getCqfoTextForPages = (cqfoText, pageNumbers) => {
+  const pages = splitCqfoTextByPage(cqfoText);
+
+  return pageNumbers.map(pageNumber => {
+    const pageText = pages[pageNumber - 1] || '';
+    return `--- CQFO PAGE ${pageNumber} ---\n${pageText}`;
+  }).join('\n\n');
+};
+
 
 // ======================================================
 // PROMPTS
@@ -735,72 +907,48 @@ ${JSON.stringify(outputTemplate)}
   return { systemPrompt, userPrompt };
 };
 
-const buildCqfoVisionPrompts = (cqfoText, cqfoImages) => {
+const buildCqfoVisionPrompts = (cqfoText, cqfoImages, batch) => {
   const systemPrompt = `
-You are Agent 1B, a visual CQFO extraction system.
+You are a strict visual CQFO extraction system.
 
-The CQFO uses GREEN HIGHLIGHTING to show selected answers. Inspect every page
-image carefully. The page images are the source of truth for selected options.
-The extracted text contains all available options and does not preserve color.
+The CQFO uses GREEN HIGHLIGHTING to indicate selected choices. Inspect the
+provided page images carefully. Page images are the source of truth for
+Yes/No and multiple-choice selections.
 
-RULES:
+CURRENT PAGE SCOPE:
 
-1. Extract every typed value and every green-highlighted selection.
-2. Never choose Yes or No based only on option order.
-3. Never guess an option that is not visibly selected.
-4. Preserve exact names, phone numbers, dates and selected options.
-5. Return raw JSON only.
-6. Do not include explanations.
-7. Use "United States" instead of "USA" for the address country.
-8. Languages entered under the fluency question must have fluent set to true.
-9. Convert a percentage GPA to the 4.0 scale by multiplying by 0.04.
-10. For 72%, return gpa "2.88" and gpaScale "4.0".
+${batch.focus}
 
-EEO NORMALIZATION:
+GENERAL RULES:
 
+1. Extract only information visible on the supplied pages.
+2. Do not extract information from pages outside the current scope.
+3. Read all typed values, tables and green-highlighted selections.
+4. Never choose an option based only on its order in extracted text.
+5. Never guess a value that is not visibly selected or entered.
+6. Do not create empty application-memory answers.
+7. Use stable camelCase keys.
+8. Use source "cqfo".
+9. Keep every fact atomic. Do not combine unrelated answers.
+10. Return raw JSON only.
+
+NORMALIZATION:
+
+- Use "United States" instead of "USA" for address country.
 - authorizedToWork must be "Yes", "No" or "".
 - requireVisaNow must be "Yes", "No" or "".
 - requireVisaFuture must be "Yes", "No" or "".
-- disability must be:
-  "Yes, I have a disability",
-  "No, I don't have a disability",
-  or "".
-- veteran must be:
-  "I am a protected veteran",
-  "I am not a protected veteran",
-  or "".
+- disability must use the supported ATS wording.
+- veteran must use the supported ATS wording.
+- Convert percentage GPA to a 4.0 scale by multiplying it by 0.04.
+- Preserve phone numbers, dates, names and selected values accurately.
 
 APPLICATION MEMORY:
 
-Create one atomic answer per reusable field. Do not combine multiple reference
-or certification properties into one answer.
+Create separate fields for salary, authorization, sponsorship, references,
+certifications, legal declarations and interview availability.
 
-Include all supported fields, including:
-
-- telephoneAccessible24Hours
-- dateOfBirth
-- stopApplicationIfDobRequired
-- race
-- travelPercentage
-- travelFlexibility
-- willingToRelocate
-- eveningsWeekendsAvailable
-- nationality
-- additionalNationalities
-- otherCitizenshipOrResidency
-- canadaWorkAuthorizationDetails
-- salaryMinimum
-- salaryMaximum
-- salaryCurrency
-- salaryNegotiationNotes
-- sponsorshipRequired
-- sponsorshipDetails
-- governmentEmployment
-- employmentAgreement
-- criminalHistory
-- interviewAvailability
-
-For each reference, create separate entries such as:
+References must use separate keys, for example:
 
 - reference1FullName
 - reference1Relationship
@@ -809,67 +957,37 @@ For each reference, create separate entries such as:
 - reference1Phone
 - reference1Email
 
-Do the same for reference2 and reference3.
-
-For each certification, create separate entries such as:
+Certifications must use separate keys, for example:
 
 - certification1Name
 - certification1Issuer
 - certification1DateAchieved
 - certification1ExpirationDate
 
-For work authorization, citizenship and sponsorship, always create separate
-atomic entries. Never combine them into one answer.
-
-Use these keys when supported:
-
-- authorizedToWorkUSA
-- authorizedToWorkCanada
-- requiresCanadaSponsorship
-- canadaWorkAuthorizationDetails
-- otherCitizenshipOrResidency
-- sponsorshipRequired
-- sponsorshipDetails
-
-The answer for otherCitizenshipOrResidency must contain only "Yes" or "No".
-Do not append work-authorization or sponsorship details to it.
-
-When the form asks for languages other than English and lists languages,
-include English as a fluent language unless the document explicitly says the
-candidate is not fluent in English.
-
-For eeo.veteran use only:
-
-- "I am a protected veteran"
-- "I am not a protected veteran"
-- ""
-
-Preserve the exact original veteran selection separately in applicationMemory
-using the key veteranStatusOriginal.
-
-Mark salary, date of birth, EEO, nationality, citizenship, authorization,
+Mark date of birth, EEO, salary, nationality, citizenship, authorization,
 sponsorship, references and legal answers as sensitive.
-
-Every application-memory answer must use source "cqfo".
-Use answerType "text".
-Do not create empty answer entries.
 `.trim();
 
-  const userPrompt = `
-CQFO TEXT FOR REFERENCE:
+  const pageText = getCqfoTextForPages(cqfoText, batch.pages);
 
-${cqfoText.slice(0, 30000)}
+  const userPrompt = `
+TEXT FROM THE CURRENT CQFO PAGES:
+
+${pageText}
 
 RETURN THIS STRUCTURE:
 
-${JSON.stringify(CQFO_VISUAL_TEMPLATE)}
+${JSON.stringify(batch.template)}
 `.trim();
 
   const userContent = [
     { type: 'text', text: userPrompt },
+
     ...cqfoImages.map(image => ({
       type: 'image_url',
-      image_url: { url: image.dataUrl }
+      image_url: {
+        url: image.dataUrl
+      }
     }))
   ];
 
@@ -880,6 +998,372 @@ ${JSON.stringify(CQFO_VISUAL_TEMPLATE)}
   };
 };
 
+
+const normalizeMemoryKey = (value) => {
+  return typeof value === 'string'
+    ? value.trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+    : '';
+};
+
+const mergeVisionLanguages = (current = [], incoming = []) => {
+  const languages = new Map();
+
+  [...current, ...incoming].forEach(item => {
+    const key = cleanValue(item?.language).toLowerCase();
+
+    if (!key) return;
+
+    languages.set(key, {
+      language: cleanValue(item.language),
+      proficiency: cleanValue(item.proficiency),
+      fluent: item.fluent === true
+    });
+  });
+
+  return [...languages.values()];
+};
+
+const mergeVisionMemoryAnswers = (current = [], incoming = []) => {
+  const answers = new Map();
+
+  [...current, ...incoming].forEach(item => {
+    const key = normalizeMemoryKey(item?.key);
+
+    if (!key || !hasMeaningfulValue(item?.answer)) return;
+
+    const existing = answers.get(key);
+
+    if (!existing) {
+      answers.set(key, item);
+      return;
+    }
+
+    const existingConfidence = Number(existing.confidence) || 0;
+    const incomingConfidence = Number(item.confidence) || 0;
+    const preferred = incomingConfidence >= existingConfidence
+      ? { ...existing, ...item }
+      : { ...item, ...existing };
+
+    preferred.aliases = [
+      ...new Set([
+        ...(existing.aliases || []),
+        ...(item.aliases || [])
+      ])
+    ];
+
+    answers.set(key, preferred);
+  });
+
+  return [...answers.values()];
+};
+
+const mergeCqfoVisionResults = (results) => {
+  const merged = {
+    personalInfo: {},
+    contactInfo: {},
+    educationHistory: [],
+    eeo: {},
+    applicationMemory: {
+      answers: []
+    }
+  };
+
+  results.forEach(result => {
+    const data = unwrapExtractionResult(result);
+    const previousLanguages = merged.personalInfo.languages || [];
+    const incomingLanguages = data.personalInfo?.languages || [];
+
+    merged.personalInfo = mergeNonEmpty(
+      merged.personalInfo,
+      data.personalInfo || {}
+    );
+
+    merged.personalInfo.languages = mergeVisionLanguages(
+      previousLanguages,
+      incomingLanguages
+    );
+
+    merged.contactInfo = mergeNonEmpty(
+      merged.contactInfo,
+      data.contactInfo || {}
+    );
+
+    merged.eeo = mergeNonEmpty(
+      merged.eeo,
+      data.eeo || {}
+    );
+
+    if (
+      Array.isArray(data.educationHistory) &&
+      data.educationHistory.length > 0
+    ) {
+      merged.educationHistory = data.educationHistory;
+    }
+
+    merged.applicationMemory.answers = mergeVisionMemoryAnswers(
+      merged.applicationMemory.answers,
+      data.applicationMemory?.answers || []
+    );
+  });
+
+  return merged;
+};
+
+const getVisionMemoryKeys = (visionResult) => {
+  const answers = visionResult?.applicationMemory?.answers || [];
+
+  return new Set(
+    answers
+      .map(item => normalizeMemoryKey(item?.key))
+      .filter(Boolean)
+  );
+};
+
+const buildRecoveryTemplate = (missingKeys) => {
+  const template = {};
+
+  missingKeys.forEach(key => {
+    template[key] = '';
+  });
+
+  return template;
+};
+
+const buildRecoveryFieldDescriptions = (missingKeys) => {
+  return missingKeys.map(key => {
+    const field = CQFO_RECOVERY_FIELDS[key];
+
+    return [
+      `KEY: ${key}`,
+      `QUESTION: ${field.question}`,
+      `FORMAT: ${field.description}`
+    ].join('\n');
+  }).join('\n\n');
+};
+
+const buildCqfoRecoveryPrompts = ({
+  cqfoText,
+  cqfoImages,
+  pages,
+  missingKeys
+}) => {
+  const pageText = getCqfoTextForPages(cqfoText, pages);
+  const outputTemplate = buildRecoveryTemplate(missingKeys);
+
+  const systemPrompt = `
+You are a focused visual CQFO recovery system.
+
+The previous extraction missed specific fields. Inspect only the supplied
+pages and recover only the requested keys.
+
+IMPORTANT:
+
+1. Green highlighting indicates the selected answer.
+2. Page images are the source of truth for Yes/No selections.
+3. Extract typed values from tables and text boxes exactly.
+4. Never guess from option order in the extracted text.
+5. Return every requested key.
+6. Return an empty string only when the field truly has no answer.
+7. Do not return extra keys.
+8. Return raw JSON only.
+
+REQUESTED FIELDS:
+
+${buildRecoveryFieldDescriptions(missingKeys)}
+`.trim();
+
+  const userPrompt = `
+CQFO PAGE TEXT:
+
+${pageText}
+
+RETURN THIS EXACT OBJECT:
+
+${JSON.stringify(outputTemplate)}
+`.trim();
+
+  const userContent = [
+    { type: 'text', text: userPrompt },
+
+    ...cqfoImages.map(image => ({
+      type: 'image_url',
+      image_url: {
+        url: image.dataUrl
+      }
+    }))
+  ];
+
+  return {
+    systemPrompt,
+    userPrompt,
+    userContent,
+    outputTemplate
+  };
+};
+
+const convertRecoveredFieldsToMemory = (fields) => {
+  return Object.entries(fields || {})
+    .filter(([key, value]) => {
+      return CQFO_RECOVERY_FIELDS[key] &&
+        value !== '' &&
+        value !== null &&
+        value !== undefined;
+    })
+    .map(([key, value]) => {
+      const config = CQFO_RECOVERY_FIELDS[key];
+
+      return {
+        key,
+        question: config.question,
+        answer: typeof value === 'string' ? value.trim() : value,
+        answerType: 'text',
+        aliases: [],
+        source: 'cqfo',
+        sensitive: config.sensitive,
+        confidence: 1
+      };
+    });
+};
+
+const normalizeRecoveredSalary = (fields) => {
+  const result = { ...fields };
+
+  ['salaryMinimum', 'salaryMaximum'].forEach(key => {
+    if (typeof result[key] === 'string') {
+      result[key] = result[key].replace(/[^\d.]/g, '');
+    }
+  });
+
+  if (typeof result.salaryCurrency === 'string') {
+    result.salaryCurrency = result.salaryCurrency.trim().toUpperCase();
+  }
+
+  return result;
+};
+
+const recoverSalaryFromCqfoText = (cqfoText) => {
+  const result = {};
+
+  const salaryMatch = cqfoText.match(
+    /From\s*_*\s*([\d,]+).*?\b([A-Z]{3})\b\s+to\s*_*\s*([\d,]+).*?\b([A-Z]{3})\b/is
+  );
+
+  if (salaryMatch) {
+    result.salaryMinimum = salaryMatch[1].replace(/,/g, '');
+    result.salaryMaximum = salaryMatch[3].replace(/,/g, '');
+    result.salaryCurrency = salaryMatch[2].toUpperCase();
+  }
+
+  const negotiationMatch = cqfoText.match(
+    /regarding salary negotiations,[\s\S]*?below\.\s*\n+([^\n]+)/i
+  );
+
+  if (negotiationMatch) {
+    result.salaryNegotiationNotes = negotiationMatch[1].trim();
+  }
+
+  return result;
+};
+
+const recoverMissingCqfoFields = async ({
+  cqfoText,
+  cqfoImages,
+  visionResult,
+  model
+}) => {
+  let recoveredResult = {
+    ...visionResult,
+    applicationMemory: {
+      answers: [
+        ...(visionResult?.applicationMemory?.answers || [])
+      ]
+    }
+  };
+
+  const salaryFromText = recoverSalaryFromCqfoText(cqfoText);
+  const salaryAnswers = convertRecoveredFieldsToMemory(salaryFromText);
+
+  recoveredResult.applicationMemory.answers = mergeVisionMemoryAnswers(
+    recoveredResult.applicationMemory.answers,
+    salaryAnswers
+  );
+
+  const runRecoveryGroup = async (keys, pages, name) => {
+    const existingKeys = getVisionMemoryKeys(recoveredResult);
+
+    const missingKeys = keys.filter(key => {
+      return !existingKeys.has(normalizeMemoryKey(key));
+    });
+
+    if (missingKeys.length === 0) return;
+
+    const pageImages = cqfoImages.filter(image => {
+      return pages.includes(image.pageNumber);
+    });
+
+    if (pageImages.length === 0) {
+      throw new Error(
+        `Missing CQFO page images needed to recover: ${missingKeys.join(', ')}`
+      );
+    }
+
+    console.log(
+      `Recovering missing CQFO fields from pages ${pages.join(', ')}: ` +
+      missingKeys.join(', ')
+    );
+
+    const prompts = buildCqfoRecoveryPrompts({
+      cqfoText,
+      cqfoImages: pageImages,
+      pages,
+      missingKeys
+    });
+
+    const result = await makeHuggingFaceRequest({
+      task: 'extraction',
+      systemPrompt: prompts.systemPrompt,
+      userPrompt: prompts.userPrompt,
+      userContent: prompts.userContent,
+      modelOverride: model,
+      maxTokensOverride: getPositiveInteger(
+        process.env.HF_VISION_RECOVERY_MAX_TOKENS,
+        1800
+      ),
+      reasoningEffortOverride:
+        process.env.HF_VISION_REASONING || 'low',
+      temperature: 0,
+      responseSchema: templateToJsonSchema(prompts.outputTemplate),
+      schemaName: name
+    });
+
+    const normalizedResult = normalizeRecoveredSalary(
+      unwrapExtractionResult(result)
+    );
+
+    const recoveredAnswers = convertRecoveredFieldsToMemory(
+      normalizedResult
+    );
+
+    recoveredResult.applicationMemory.answers = mergeVisionMemoryAnswers(
+      recoveredResult.applicationMemory.answers,
+      recoveredAnswers
+    );
+  };
+
+  await runRecoveryGroup(
+    CQFO_APPLICATION_RECOVERY_KEYS,
+    [3, 4],
+    'cqfo_application_recovery'
+  );
+
+  await runRecoveryGroup(
+    CQFO_LEGAL_RECOVERY_KEYS,
+    [5, 6],
+    'cqfo_legal_recovery'
+  );
+
+  return recoveredResult;
+};
 
 // ======================================================
 // OLLAMA

@@ -1,6 +1,60 @@
 import User from '../models/User.js';
 import Profile from '../models/Profile.js';
 import generateToken from '../utils/generateToken.js';
+import Application from '../models/Application.js';
+import AIUsageLog from '../models/AIUsageLog.js';
+import AutofillLog from '../models/AutofillLog.js';
+import { deleteFirebaseFileByPath } from '../services/firebaseStorageService.js';
+
+const getProfileStoragePaths = profile => {
+  return [
+    profile?.resume?.storagePath,
+    profile?.cqfo?.storagePath,
+    profile?.coverLetter?.storagePath
+  ].filter(Boolean);
+};
+
+const deleteFirebaseFiles = async storagePaths => {
+  const results = await Promise.allSettled(
+    storagePaths.map(storagePath => {
+      return deleteFirebaseFileByPath(storagePath);
+    })
+  );
+
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      console.error(
+        `Firebase cleanup failed for ${storagePaths[index]}:`,
+        result.reason?.message
+      );
+    }
+  });
+};
+
+const deleteUserResources = async user => {
+  const userId = user._id;
+
+  const profile = await Profile.findOne({ user: userId })
+    .select(
+      'resume.storagePath cqfo.storagePath coverLetter.storagePath'
+    )
+    .lean();
+
+  const storagePaths = getProfileStoragePaths(profile);
+
+  await Promise.all([
+    Application.deleteMany({ user: userId }),
+    AIUsageLog.deleteMany({ user: userId }),
+    AutofillLog.deleteMany({ user: userId }),
+    Profile.deleteOne({ user: userId })
+  ]);
+
+  await user.deleteOne();
+
+  // Database deletion is already complete, so Firebase failures
+  // are logged instead of returning a false account-deletion failure.
+  await deleteFirebaseFiles(storagePaths);
+};
 
 // --- PUBLIC ROUTES ---
 
@@ -82,16 +136,28 @@ export const deleteUserProfile = async (req, res, next) => {
   try {
     const user = await User.findById(req.user._id);
 
-    if (user) {
-      await Profile.findOneAndDelete({ user: user._id }); // Delete their application profile
-      await user.deleteOne(); // Delete the auth account
-      res.cookie('jwt', '', { httpOnly: true, expires: new Date(0) }); // Log them out
-      res.status(200).json({ message: 'User deleted successfully' });
-    } else {
+    if (!user) {
       res.status(404);
       throw new Error('User not found');
     }
-  } catch (error) { next(error); }
+
+    await deleteUserResources(user);
+
+    res.cookie('jwt', '', {
+      httpOnly: true,
+      expires: new Date(0),
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production'
+        ? 'none'
+        : 'lax'
+    });
+
+    res.status(200).json({
+      message: 'User and all associated data deleted successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
 };
 
 // --- ADMIN ROUTES (Requires login AND Admin role) ---
@@ -107,19 +173,25 @@ export const deleteUserByAdmin = async (req, res, next) => {
   try {
     const user = await User.findById(req.params.id);
 
-    if (user) {
-      if (user.role === 'admin') {
-        res.status(400);
-        throw new Error('Cannot delete another admin');
-      }
-      await Profile.findOneAndDelete({ user: user._id });
-      await user.deleteOne();
-      res.status(200).json({ message: 'User deleted successfully by admin' });
-    } else {
+    if (!user) {
       res.status(404);
       throw new Error('User not found');
     }
-  } catch (error) { next(error); }
+
+    if (user.role === 'admin') {
+      res.status(400);
+      throw new Error('Cannot delete another admin');
+    }
+
+    await deleteUserResources(user);
+
+    res.status(200).json({
+      message:
+        'User and all associated data deleted successfully by admin'
+    });
+  } catch (error) {
+    next(error);
+  }
 };
 
 export const registerAdmin = async (req, res, next) => {
