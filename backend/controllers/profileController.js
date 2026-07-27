@@ -1352,15 +1352,211 @@ const getWritingRuntimeInfo = () => {
   };
 };
 
-const normalizeGeneratedAnswers = (result, fields) => {
-  const sourceValues = [
-    'profile',
-    'applicationMemory',
-    'documents',
-    'generated',
-    'unknown'
-  ];
+const normalizeComparable = value => {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[’']/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+};
 
+const getNestedValue = (object, path) => {
+  if (!object || !path) return undefined;
+
+  const cleanPath = path
+    .replace(/^profile\./, '')
+    .replace(/\[(\d+)\]/g, '.$1');
+
+  return cleanPath.split('.').reduce((value, key) => {
+    if (value === null || value === undefined) return undefined;
+    return value[key];
+  }, object);
+};
+
+const isNarrativeApplicationField = field => {
+  const label = cleanText(field?.label).toLowerCase();
+
+  return field?.type === 'textarea' ||
+    /\bwhy\b/.test(label) ||
+    /\bdescribe\b/.test(label) ||
+    /\bexplain\b/.test(label) ||
+    /\btell us\b/.test(label) ||
+    /\bsummar(?:y|ise|ize)\b/.test(label) ||
+    /\bcover letter\b/.test(label) ||
+    /\badditional information\b/.test(label) ||
+    /\binterest(?:ed)?\b/.test(label) ||
+    /\bqualification\b/.test(label) ||
+    /\bexperience\b/.test(label);
+};
+
+const findApplicationMemoryEntry = (answers, key) => {
+  const wantedKey = normalizeMemoryKey(key);
+
+  return (answers || []).find(item => {
+    return normalizeMemoryKey(item?.key) === wantedKey;
+  });
+};
+
+const documentContainsQuote = (documentText, quote) => {
+  const normalizedDocument = normalizeComparable(documentText);
+  const normalizedQuote = normalizeComparable(quote);
+
+  return normalizedQuote.length >= 3 &&
+    normalizedDocument.includes(normalizedQuote);
+};
+
+const validateAgentEvidence = ({
+  answer,
+  field,
+  candidateContext
+}) => {
+  const source = cleanText(answer?.evidenceSource);
+  const evidenceKey = cleanText(answer?.evidenceKey);
+  const evidenceQuote = cleanText(answer?.evidenceQuote);
+
+  if (source === 'profile') {
+    const evidenceValue = getNestedValue(
+      candidateContext.profile,
+      evidenceKey
+    );
+
+    return hasApplicationValue(evidenceValue);
+  }
+
+  if (source === 'applicationMemory') {
+    const memoryEntry = findApplicationMemoryEntry(
+      candidateContext.applicationMemory,
+      evidenceKey
+    );
+
+    return hasApplicationValue(memoryEntry?.answer);
+  }
+
+  if (source === 'resume') {
+    return documentContainsQuote(
+      candidateContext.documents?.resume?.rawText,
+      evidenceQuote
+    );
+  }
+
+  if (source === 'cqfo') {
+    return documentContainsQuote(
+      candidateContext.documents?.cqfo?.rawText,
+      evidenceQuote
+    );
+  }
+
+  if (source === 'coverLetter') {
+    return documentContainsQuote(
+      candidateContext.documents?.coverLetter?.rawText,
+      evidenceQuote
+    );
+  }
+
+  if (source === 'generated') {
+    return isNarrativeApplicationField(field);
+  }
+
+  return false;
+};
+
+const matchApplicationOption = (value, options) => {
+  if (!Array.isArray(options) || options.length === 0) {
+    return value;
+  }
+
+  const normalizedValue = normalizeComparable(value);
+
+  if (!normalizedValue) return '';
+
+  const exactMatch = options.find(option => {
+    return normalizeComparable(option) === normalizedValue;
+  });
+
+  if (exactMatch !== undefined) return exactMatch;
+
+  const yesValue = /^(yes|true|1)$/.test(normalizedValue);
+  const noValue = /^(no|false|0)$/.test(normalizedValue);
+
+  if (yesValue) {
+    const yesOption = options.find(option => {
+      const normalizedOption = normalizeComparable(option);
+
+      return normalizedOption === 'yes' ||
+        normalizedOption.startsWith('yes ') ||
+        normalizedOption.includes('i am authorised') ||
+        normalizedOption.includes('i am authorized');
+    });
+
+    if (yesOption !== undefined) return yesOption;
+  }
+
+  if (noValue) {
+    const noOption = options.find(option => {
+      const normalizedOption = normalizeComparable(option);
+
+      return normalizedOption === 'no' ||
+        normalizedOption.startsWith('no ') ||
+        normalizedOption.includes('not authorised') ||
+        normalizedOption.includes('not authorized');
+    });
+
+    if (noOption !== undefined) return noOption;
+  }
+
+  const containedMatch = options.find(option => {
+    const normalizedOption = normalizeComparable(option);
+
+    return normalizedOption.includes(normalizedValue) ||
+      normalizedValue.includes(normalizedOption);
+  });
+
+  return containedMatch ?? '';
+};
+
+const truncateApplicationAnswer = (value, maxLength) => {
+  if (
+    typeof value !== 'string' ||
+    !Number.isFinite(maxLength) ||
+    maxLength <= 0 ||
+    value.length <= maxLength
+  ) {
+    return value;
+  }
+
+  const shortened = value.slice(0, maxLength + 1);
+  const lastSpace = shortened.lastIndexOf(' ');
+
+  return (
+    lastSpace >= Math.floor(maxLength * 0.7)
+      ? shortened.slice(0, lastSpace)
+      : shortened.slice(0, maxLength)
+  ).trim();
+};
+
+const mapEvidenceSourceToStoredSource = source => {
+  if (source === 'profile') return 'profile';
+  if (source === 'applicationMemory') return 'applicationMemory';
+
+  if (
+    source === 'resume' ||
+    source === 'cqfo' ||
+    source === 'coverLetter'
+  ) {
+    return 'documents';
+  }
+
+  if (source === 'generated') return 'generated';
+
+  return 'unknown';
+};
+
+const normalizeGeneratedAnswers = (
+  result,
+  fields,
+  candidateContext
+) => {
   const rawAnswers = Array.isArray(result?.answers)
     ? result.answers
     : [];
@@ -1368,31 +1564,100 @@ const normalizeGeneratedAnswers = (result, fields) => {
   const answerMap = new Map();
 
   rawAnswers.forEach(answer => {
-    if (answer?.fieldId) {
-      answerMap.set(answer.fieldId, answer);
+    const fieldId = cleanText(answer?.fieldId);
+
+    if (fieldId) {
+      answerMap.set(fieldId, answer);
     }
   });
 
   return fields.map(field => {
-    const answer = answerMap.get(field.fieldId) || {};
-    const value = answer.value ?? '';
+    const rawAnswer = answerMap.get(field.fieldId) || {};
+    const evidenceValid = validateAgentEvidence({
+      answer: rawAnswer,
+      field,
+      candidateContext
+    });
+
+    if (!evidenceValid) {
+      return {
+        fieldId: field.fieldId,
+        label: field.label,
+        value: '',
+        source: 'unknown',
+        confidence: 0,
+        requiresReview: true,
+        reviewReason:
+          'No supporting information was found in the profile or uploaded documents.'
+      };
+    }
+
+    let value = rawAnswer.value ?? '';
+
+    if (
+      field.type === 'select' ||
+      field.type === 'radio' ||
+      field.type === 'checkbox'
+    ) {
+      value = matchApplicationOption(
+        value,
+        field.options
+      );
+
+      if (!hasApplicationValue(value)) {
+        return {
+          fieldId: field.fieldId,
+          label: field.label,
+          value: '',
+          source: 'unknown',
+          confidence: 0,
+          requiresReview: true,
+          reviewReason:
+            'Supporting information was found, but it did not match an available form option.'
+        };
+      }
+    }
+
+    value = truncateApplicationAnswer(
+      value,
+      field.maxLength
+    );
+
+    if (!hasApplicationValue(value)) {
+      return {
+        fieldId: field.fieldId,
+        label: field.label,
+        value: '',
+        source: 'unknown',
+        confidence: 0,
+        requiresReview: true,
+        reviewReason:
+          'No supported answer was available for this field.'
+      };
+    }
+
     const confidence = Math.min(
       1,
-      Math.max(0, Number(answer.confidence) || 0)
+      Math.max(
+        0,
+        Number(rawAnswer.confidence) || 0
+      )
     );
 
     return {
       fieldId: field.fieldId,
       label: field.label,
       value,
-      source: sourceValues.includes(answer.source)
-        ? answer.source
-        : 'unknown',
+      source: mapEvidenceSourceToStoredSource(
+        rawAnswer.evidenceSource
+      ),
       confidence,
       requiresReview:
-        answer.requiresReview !== false ||
-        !hasApplicationValue(value),
-      reviewReason: cleanText(answer.reviewReason)
+        rawAnswer.requiresReview === true,
+      reviewReason:
+        rawAnswer.requiresReview === true
+          ? cleanText(rawAnswer.reviewReason)
+          : ''
     };
   });
 };
@@ -1919,7 +2184,8 @@ export const answerApplicationQuestions = async (req, res, next) => {
 
     let answers = normalizeGeneratedAnswers(
       result,
-      fields
+      fields,
+      candidateContext
     );
 
     answers = applyAnswerReviewRules({

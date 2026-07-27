@@ -312,6 +312,67 @@ const CQFO_LEGAL_RECOVERY_KEYS = [
   'criminalHistory',
   'interviewAvailability'
 ];
+
+const FORM_ANSWER_RESPONSE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['answers'],
+  properties: {
+    answers: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'fieldId',
+          'value',
+          'evidenceSource',
+          'evidenceKey',
+          'evidenceQuote',
+          'confidence',
+          'requiresReview',
+          'reviewReason'
+        ],
+        properties: {
+          fieldId: { type: 'string' },
+          value: {
+            anyOf: [
+              { type: 'string' },
+              { type: 'number' },
+              { type: 'boolean' },
+              {
+                type: 'array',
+                items: { type: 'string' }
+              }
+            ]
+          },
+          evidenceSource: {
+            type: 'string',
+            enum: [
+              'profile',
+              'applicationMemory',
+              'resume',
+              'cqfo',
+              'coverLetter',
+              'generated',
+              'none'
+            ]
+          },
+          evidenceKey: { type: 'string' },
+          evidenceQuote: { type: 'string' },
+          confidence: {
+            type: 'number',
+            minimum: 0,
+            maximum: 1
+          },
+          requiresReview: { type: 'boolean' },
+          reviewReason: { type: 'string' }
+        }
+      }
+    }
+  }
+};
+
 // ======================================================
 // GENERAL HELPERS
 // ======================================================
@@ -1860,33 +1921,94 @@ const callHuggingFaceForAnswers = async (prompts) => {
   }
 };
 
-export const generateFormAnswers = async ({ candidateContext, jobContext, fields }) => {
-  if (!candidateContext || typeof candidateContext !== 'object') {
-    throw new Error('generateFormAnswers requires candidateContext.');
-  }
+export const generateFormAnswers = async ({
+  candidateContext,
+  jobContext,
+  fields
+}) => {
+  const systemPrompt = `
+You are Agent 2, an evidence-based job-application form completion agent.
 
-  if (!jobContext || typeof jobContext !== 'object') {
-    throw new Error('generateFormAnswers requires jobContext.');
-  }
+You receive only fields that the browser's script-based autofill engine could
+not fill. You must attempt every supplied field, including simple fields such
+as name, email, telephone, address, Yes/No questions, radio fields, dropdowns,
+dates, salary questions and open-ended text questions.
 
-  if (!Array.isArray(fields) || fields.length === 0) {
-    throw new Error('generateFormAnswers requires unresolved fields.');
-  }
+EVIDENCE PRIORITY:
 
-  const prompts = buildAnswerPrompts({ candidateContext, jobContext, fields });
-  const provider = getProvider();
+1. Structured candidate profile
+2. Application memory extracted from the CQFO
+3. Resume raw text
+4. CQFO raw text
+5. Cover-letter raw text
+6. Generated text based only on known candidate and job facts
 
-  if (provider === 'ollama') {
-    return makeOllamaRequest({
-      task: 'writing',
-      ...prompts,
-      temperature: 0.25
-    });
-  }
+STRICT RULES:
 
-  if (['huggingface', 'hugging-face', 'hf'].includes(provider)) {
-    return callHuggingFaceForAnswers(prompts);
-  }
+1. Never invent a factual value.
+2. Never infer sensitive or legal information when it is absent.
+3. A factual answer may only be returned when supporting information exists
+   in the supplied candidate context.
+4. When the fact does not exist anywhere, return an empty string.
+5. Use evidenceSource "none" when no supporting information exists.
+6. Use evidenceSource "generated" only for open-ended narrative questions,
+   such as motivation, experience summaries or why the candidate is suitable.
+7. Generated narrative answers must use only facts from the supplied profile,
+   documents and job context.
+8. For profile evidence, evidenceKey must be a real path such as:
+   contactInfo.email
+   personalInfo.firstName
+   workHistory.0.company
+9. For application-memory evidence, evidenceKey must be the exact memory key,
+   such as authorizedToWorkCanada or salaryMinimum.
+10. For resume, CQFO or cover-letter evidence, evidenceQuote must contain a
+    short exact supporting phrase copied from that document.
+11. For radio, checkbox and select fields, return one of the provided options.
+12. Do not return an option that is not present in the field's options.
+13. Country-specific questions must use country-specific evidence.
+14. Do not apply Canadian work-authorisation or sponsorship answers to a
+    United States-specific question.
+15. Do not apply United States answers to a Canada-specific question.
+16. For an unknown country, leave country-specific answers empty unless an
+    exact matching fact exists.
+17. Preserve factual numbers, dates, names, phone numbers and identifiers.
+18. Return one answer object for every supplied field.
+19. Return raw JSON only.
 
-  throw new Error(`Unsupported LLM provider: "${provider}".`);
+EXAMPLES:
+
+- A missed full-name field may be answered from personalInfo.
+- A missed email field may be answered from contactInfo.email.
+- A missed Canada authorisation field may use authorizedToWorkCanada.
+- A missed "Why are you interested?" field may use generated text.
+- A missed taxpayer, licence or government identifier must remain empty when
+  that identifier is not found anywhere.
+`.trim();
+
+  const userPrompt = JSON.stringify({
+    instruction:
+      'Answer every unresolved field using only supported candidate evidence.',
+    jobContext,
+    candidateContext,
+    fields
+  });
+
+  return makeHuggingFaceRequest({
+    task: 'writing',
+    systemPrompt,
+    userPrompt,
+    temperature: 0.1,
+    modelOverride:
+      process.env.HF_WRITING_MODEL ||
+      process.env.HF_EXTRACTION_MODEL ||
+      'openai/gpt-oss-120b',
+    maxTokensOverride: Number.parseInt(
+      process.env.HF_WRITING_MAX_TOKENS || '4000',
+      10
+    ),
+    reasoningEffortOverride:
+      process.env.HF_WRITING_REASONING || 'medium',
+    responseSchema: FORM_ANSWER_RESPONSE_SCHEMA,
+    schemaName: 'job_application_answers'
+  });
 };
