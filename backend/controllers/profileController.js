@@ -1709,6 +1709,7 @@ const applyAnswerReviewRules = ({
   );
 
   const jobCountry = inferJobCountry(jobContext);
+
   const storedSalaryCurrency = getApplicationMemoryValue(
     applicationMemory,
     'salaryCurrency'
@@ -1721,11 +1722,9 @@ const applyAnswerReviewRules = ({
     const isSalaryField =
       /\bsalary\b|\bcompensation\b|\bpay range\b/.test(label);
 
+    // Preserve all existing review information for non-salary answers.
     if (!isSalaryField || !hasApplicationValue(answer.value)) {
-      return {
-        ...answer,
-        reviewReason: ''
-      };
+      return answer;
     }
 
     const currencyMismatch =
@@ -1736,10 +1735,7 @@ const applyAnswerReviewRules = ({
       );
 
     if (!currencyMismatch) {
-      return {
-        ...answer,
-        reviewReason: ''
-      };
+      return answer;
     }
 
     return {
