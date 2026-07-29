@@ -1,3 +1,4 @@
+//db.js
 import mongoose from 'mongoose';
 import dns from "node:dns/promises";
 

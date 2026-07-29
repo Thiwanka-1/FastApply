@@ -1,3 +1,4 @@
+//applicationController.js
 import Application from '../models/Application.js';
 import AIUsageLog from '../models/AIUsageLog.js';
 

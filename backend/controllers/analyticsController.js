@@ -1,3 +1,4 @@
+//analyticsController.js
 import AutofillLog from '../models/AutofillLog.js';
 import User from '../models/User.js';
 

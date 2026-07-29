@@ -1,3 +1,4 @@
+//applicationRoutes.js
 import express from 'express';
 import {
   createApplication,

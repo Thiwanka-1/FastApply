@@ -1,3 +1,4 @@
+//application.js
 import mongoose from 'mongoose';
 
 const jobContextSchema = new mongoose.Schema({

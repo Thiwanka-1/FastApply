@@ -1,3 +1,4 @@
+//aiUsageLog.js
 import mongoose from 'mongoose';
 
 const aiUsageLogSchema = new mongoose.Schema({

@@ -1,184 +1,1014 @@
-import React, { useState, useEffect } from 'react';
+import React, {
+  useEffect,
+  useMemo,
+  useState
+} from 'react';
 import ReactDOM from 'react-dom/client';
-import axios from 'axios';
-import { User, MapPin, Briefcase, GraduationCap, Copy, Check, ExternalLink, Loader2, AlertTriangle } from 'lucide-react';
+import {
+  Search,
+  Bot,
+  Loader2,
+  AlertTriangle,
+  CheckCircle2,
+  CircleAlert,
+  CircleX,
+  Copy,
+  Check,
+  User,
+  MapPin,
+  Briefcase,
+  GraduationCap,
+  ExternalLink,
+  FileText,
+  Zap,
+  RefreshCw
+} from 'lucide-react';
 import './index.css';
 
-const API_URL = import.meta.env.VITE_API_BASE_URL;
-axios.defaults.withCredentials = true;
+const STORAGE_KEYS = [
+  'profileData',
+  'lastPageScan',
+  'lastAgent2Result',
+  'lastAgent2Summary',
+  'agent2RunState'
+];
 
-// --- REUSABLE CLICK-TO-COPY COMPONENT ---
-const CopyField = ({ label, value, isLink = false }) => {
-  const [copied, setCopied] = useState(false);
+const hasChromeStorage = () => {
+  return (
+    typeof chrome !== 'undefined' &&
+    chrome.storage?.local
+  );
+};
 
-  if (!value) return null; // Don't render empty fields
+const readStorage = keys => {
+  return new Promise(resolve => {
+    if (!hasChromeStorage()) {
+      resolve({});
+      return;
+    }
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(value);
+    chrome.storage.local.get(
+      keys,
+      values => resolve(values || {})
+    );
+  });
+};
+
+const sendRuntimeMessage = request => {
+  return new Promise(resolve => {
+    chrome.runtime.sendMessage(
+      request,
+      response => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            success: false,
+            error:
+              chrome.runtime.lastError.message
+          });
+          return;
+        }
+
+        resolve(response);
+      }
+    );
+  });
+};
+
+const getActiveTab = () => {
+  return new Promise(resolve => {
+    chrome.tabs.query(
+      {
+        active: true,
+        currentWindow: true
+      },
+      tabs => {
+        resolve(tabs?.[0] || null);
+      }
+    );
+  });
+};
+
+const sendToActivePage = async action => {
+  const tab = await getActiveTab();
+
+  if (!tab?.id) {
+    return {
+      success: false,
+      error: 'No active browser tab was found.'
+    };
+  }
+
+  return new Promise(resolve => {
+    chrome.tabs.sendMessage(
+      tab.id,
+      { action },
+      { frameId: 0 },
+      response => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            success: false,
+            error:
+              'FastApply is not connected to this page. Reload the job page after reloading the extension.'
+          });
+          return;
+        }
+
+        resolve(
+          response || {
+            success: false,
+            error:
+              'The job page did not return a response.'
+          }
+        );
+      }
+    );
+  });
+};
+
+const hasValue = value => {
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+
+  return (
+    value !== '' &&
+    value !== null &&
+    value !== undefined
+  );
+};
+
+const formatValue = value => {
+  if (Array.isArray(value)) {
+    return value.join(', ');
+  }
+
+  if (
+    value &&
+    typeof value === 'object'
+  ) {
+    return JSON.stringify(value);
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? 'Yes' : 'No';
+  }
+
+  return String(value ?? '');
+};
+
+const formatDate = value => {
+  if (!value) return '';
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+};
+
+const CopyField = ({
+  label,
+  value,
+  link = false
+}) => {
+  const [copied, setCopied] =
+    useState(false);
+
+  if (!hasValue(value)) return null;
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(
+      formatValue(value)
+    );
+
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+
+    window.setTimeout(() => {
+      setCopied(false);
+    }, 1500);
   };
 
   return (
-    <div 
-      onClick={isLink ? null : handleCopy}
-      className={`group flex items-start justify-between py-2 border-b border-slate-800/50 last:border-0 ${isLink ? '' : 'cursor-pointer hover:bg-slate-800/30'} -mx-2 px-2 rounded-lg transition-colors`}
-      title={isLink ? '' : 'Click to copy'}
-    >
-      <div className="flex-1 pr-4">
-        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-0.5">{label}</p>
-        {isLink ? (
-          <a href={value} target="_blank" rel="noopener noreferrer" className="text-sm text-cyan-400 hover:underline flex items-center">
-            {value} <ExternalLink className="w-3 h-3 ml-1 inline" />
-          </a>
-        ) : (
-          <p className="text-sm text-slate-200 break-all">{value}</p>
-        )}
-      </div>
-      {!isLink && (
-        <div className="shrink-0 mt-3 opacity-0 group-hover:opacity-100 transition-opacity">
-          {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-slate-500" />}
-        </div>
+    <div className="border-b border-slate-800/60 py-2 last:border-0">
+      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-600">
+        {label}
+      </p>
+
+      {link ? (
+        <button
+          type="button"
+          onClick={() => {
+            chrome.tabs.create({
+              url: formatValue(value)
+            });
+          }}
+          className="mt-1 flex max-w-full items-center text-left text-sm text-cyan-400"
+        >
+          <span className="truncate">
+            {formatValue(value)}
+          </span>
+
+          <ExternalLink className="ml-1 h-3 w-3 shrink-0" />
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={copy}
+          className="mt-1 flex w-full items-start justify-between gap-3 text-left"
+        >
+          <span className="break-words text-sm text-slate-200">
+            {formatValue(value)}
+          </span>
+
+          {copied ? (
+            <Check className="h-4 w-4 shrink-0 text-emerald-400" />
+          ) : (
+            <Copy className="h-4 w-4 shrink-0 text-slate-600" />
+          )}
+        </button>
       )}
     </div>
   );
 };
 
-// --- MAIN SIDE PANEL COMPONENT ---
-function SidePanel() {
-  const [profileData, setProfileData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+const Metric = ({
+  label,
+  value,
+  className
+}) => {
+  return (
+    <div
+      className={`rounded-xl border p-3 ${className}`}
+    >
+      <p className="text-xl font-black">
+        {Number(value) || 0}
+      </p>
 
-  useEffect(() => {
-    const fetchProfile = async () => {
-      try {
-        const { data } = await axios.get(`${API_URL}/api/profile`);
-        setProfileData(data);
-      } catch (err) {
-        setError(true);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchProfile();
-  }, []);
+      <p className="mt-1 text-[9px] font-bold uppercase tracking-wider opacity-80">
+        {label}
+      </p>
+    </div>
+  );
+};
 
-  if (loading) {
+const ProfileCopy = ({ profile }) => {
+  if (!profile) {
     return (
-      <div className="flex flex-col items-center justify-center h-screen bg-slate-950">
-        <Loader2 className="w-8 h-8 text-cyan-500 animate-spin mb-4" />
-        <p className="text-cyan-400 text-xs uppercase tracking-widest">Loading Profile Core...</p>
-      </div>
+      <p className="text-sm text-slate-500">
+        No profile is available.
+      </p>
     );
   }
 
-  if (error || !profileData) {
-    return (
-      <div className="p-6 h-screen bg-slate-950 text-center flex flex-col items-center justify-center">
-        <AlertTriangle className="w-10 h-10 text-amber-500 mb-4" />
-        <p className="text-slate-300 text-sm">Please log in to your FastApply dashboard to access your profile data.</p>
-      </div>
-    );
-  }
+  const personal =
+    profile.personalInfo || {};
 
-  const pInfo = profileData.personalInfo || {};
-  const cInfo = profileData.contactInfo || {};
+  const contact =
+    profile.contactInfo || {};
 
   return (
-    <div className="bg-slate-950 min-h-screen text-slate-100 font-sans custom-scrollbar overflow-y-auto pb-10">
-      
-      {/* Sticky Header */}
-      <div className="sticky top-0 bg-slate-950/80 backdrop-blur-md border-b border-slate-800 p-4 z-20">
-        <h2 className="text-lg font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-indigo-400">
-          FastApply Assistant
-        </h2>
-        <p className="text-[10px] text-slate-400 uppercase tracking-widest mt-1">Click any field to copy to clipboard</p>
-      </div>
+    <div className="space-y-4">
+      <section className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+        <h3 className="mb-2 flex items-center font-bold text-white">
+          <User className="mr-2 h-4 w-4 text-cyan-400" />
+          Personal
+        </h3>
 
-      <div className="p-4 space-y-6">
-        
-        {/* Personal Info Section */}
-        <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-4">
-          <h3 className="text-sm font-bold text-white flex items-center mb-3 pb-2 border-b border-slate-800">
-            <User className="w-4 h-4 mr-2 text-cyan-400" /> Personal Information
+        <CopyField
+          label="First Name"
+          value={personal.firstName}
+        />
+
+        <CopyField
+          label="Last Name"
+          value={personal.lastName}
+        />
+
+        <CopyField
+          label="Preferred Name"
+          value={personal.preferredName}
+        />
+
+        <CopyField
+          label="Pronouns"
+          value={personal.pronouns}
+        />
+      </section>
+
+      <section className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+        <h3 className="mb-2 flex items-center font-bold text-white">
+          <MapPin className="mr-2 h-4 w-4 text-indigo-400" />
+          Contact
+        </h3>
+
+        <CopyField
+          label="Email"
+          value={contact.email}
+        />
+
+        <CopyField
+          label="Phone"
+          value={contact.phone}
+        />
+
+        <CopyField
+          label="Address"
+          value={contact.addressLine1}
+        />
+
+        <CopyField
+          label="City"
+          value={contact.city}
+        />
+
+        <CopyField
+          label="State"
+          value={contact.state}
+        />
+
+        <CopyField
+          label="Country"
+          value={contact.country}
+        />
+
+        <CopyField
+          label="Postal Code"
+          value={contact.postalCode}
+        />
+      </section>
+
+      {profile.workHistory?.length > 0 && (
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+          <h3 className="mb-2 flex items-center font-bold text-white">
+            <Briefcase className="mr-2 h-4 w-4 text-fuchsia-400" />
+            Work History
           </h3>
-          <CopyField label="First Name" value={pInfo.firstName} />
-          <CopyField label="Last Name" value={pInfo.lastName} />
-          <CopyField label="Preferred Name" value={pInfo.preferredName} />
-          <CopyField label="Pronouns" value={pInfo.pronouns} />
-        </div>
 
-        {/* Contact Info Section */}
-        <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-4">
-          <h3 className="text-sm font-bold text-white flex items-center mb-3 pb-2 border-b border-slate-800">
-            <MapPin className="w-4 h-4 mr-2 text-indigo-400" /> Contact Information
-          </h3>
-          <CopyField label="Email" value={cInfo.email} />
-          <CopyField label="Phone" value={cInfo.phone} />
-          <CopyField label="Address Line 1" value={cInfo.addressLine1} />
-          <CopyField label="City" value={cInfo.city} />
-          <CopyField label="State/Province" value={cInfo.state} />
-          <CopyField label="Postal Code" value={cInfo.postalCode} />
-        </div>
+          {profile.workHistory.map(
+            (job, index) => (
+              <div
+                key={job._id || index}
+                className="mb-4 last:mb-0"
+              >
+                <p className="text-xs font-bold text-fuchsia-400">
+                  Position {index + 1}
+                </p>
 
-        {/* Work History Section */}
-        {profileData.workHistory && profileData.workHistory.length > 0 && (
-          <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-4">
-            <h3 className="text-sm font-bold text-white flex items-center mb-3 pb-2 border-b border-slate-800">
-              <Briefcase className="w-4 h-4 mr-2 text-fuchsia-400" /> Work History
-            </h3>
-            {profileData.workHistory.map((job, idx) => (
-              <div key={idx} className="mb-4 last:mb-0">
-                <p className="text-xs font-bold text-fuchsia-400 mb-1">Position {idx + 1}</p>
-                <CopyField label="Job Title" value={job.jobTitle} />
-                <CopyField label="Company" value={job.company} />
-                <CopyField label="Location" value={job.location} />
-                <CopyField label="Start Date" value={job.startDate} />
-                <CopyField label="End Date" value={job.currentlyWorkHere ? "Present" : job.endDate} />
-                <CopyField label="Description" value={job.description} />
+                <CopyField
+                  label="Job Title"
+                  value={job.jobTitle}
+                />
+
+                <CopyField
+                  label="Company"
+                  value={job.company}
+                />
+
+                <CopyField
+                  label="Location"
+                  value={job.location}
+                />
+
+                <CopyField
+                  label="Start Date"
+                  value={job.startDate}
+                />
+
+                <CopyField
+                  label="End Date"
+                  value={
+                    job.currentlyWorkHere
+                      ? 'Present'
+                      : job.endDate
+                  }
+                />
               </div>
-            ))}
-          </div>
-        )}
+            )
+          )}
+        </section>
+      )}
 
-        {/* Education History Section */}
-        {profileData.educationHistory && profileData.educationHistory.length > 0 && (
-          <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-4">
-            <h3 className="text-sm font-bold text-white flex items-center mb-3 pb-2 border-b border-slate-800">
-              <GraduationCap className="w-4 h-4 mr-2 text-amber-400" /> Education
-            </h3>
-            {profileData.educationHistory.map((edu, idx) => (
-              <div key={idx} className="mb-4 last:mb-0">
-                <p className="text-xs font-bold text-amber-400 mb-1">Institution {idx + 1}</p>
-                <CopyField label="School/University" value={edu.school} />
-                <CopyField label="Degree" value={edu.degree} />
-                <CopyField label="Major" value={edu.major} />
-                <CopyField label="GPA" value={edu.gpa ? `${edu.gpa} / ${edu.gpaScale}` : null} />
-                <CopyField label="Start Date" value={edu.startDate} />
-                <CopyField label="End Date" value={edu.endDate} />
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Links Section */}
-        <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-4">
-          <h3 className="text-sm font-bold text-white flex items-center mb-3 pb-2 border-b border-slate-800">
-            <ExternalLink className="w-4 h-4 mr-2 text-emerald-400" /> Web Links
+      {profile.educationHistory?.length >
+        0 && (
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+          <h3 className="mb-2 flex items-center font-bold text-white">
+            <GraduationCap className="mr-2 h-4 w-4 text-amber-400" />
+            Education
           </h3>
-          <CopyField label="LinkedIn" value={profileData.websitesAndSkills?.linkedin} />
-          <CopyField label="GitHub" value={profileData.websitesAndSkills?.github} />
-          <CopyField label="Portfolio" value={profileData.websitesAndSkills?.portfolio} />
-          <CopyField label="Resume Link" value={profileData.resume?.fileUrl} isLink={true} />
+
+          {profile.educationHistory.map(
+            (education, index) => (
+              <div
+                key={
+                  education._id || index
+                }
+                className="mb-4 last:mb-0"
+              >
+                <CopyField
+                  label={`Institution ${index + 1}`}
+                  value={education.school}
+                />
+
+                <CopyField
+                  label="Degree"
+                  value={education.degree}
+                />
+
+                <CopyField
+                  label="Major"
+                  value={education.major}
+                />
+
+                <CopyField
+                  label="Start Date"
+                  value={education.startDate}
+                />
+
+                <CopyField
+                  label="End Date"
+                  value={education.endDate}
+                />
+              </div>
+            )
+          )}
+        </section>
+      )}
+
+      <section className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+        <h3 className="mb-2 flex items-center font-bold text-white">
+          <ExternalLink className="mr-2 h-4 w-4 text-emerald-400" />
+          Links
+        </h3>
+
+        <CopyField
+          label="LinkedIn"
+          value={
+            profile.websitesAndSkills
+              ?.linkedin
+          }
+          link
+        />
+
+        <CopyField
+          label="GitHub"
+          value={
+            profile.websitesAndSkills
+              ?.github
+          }
+          link
+        />
+
+        <CopyField
+          label="Portfolio"
+          value={
+            profile.websitesAndSkills
+              ?.portfolio
+          }
+          link
+        />
+
+        <CopyField
+          label="Resume"
+          value={profile.resume?.fileUrl}
+          link
+        />
+      </section>
+    </div>
+  );
+};
+
+function SidePanel() {
+  const [view, setView] =
+    useState('controls');
+
+  const [profile, setProfile] =
+    useState(null);
+
+  const [scan, setScan] =
+    useState(null);
+
+  const [agentResult, setAgentResult] =
+    useState(null);
+
+  const [runState, setRunState] =
+    useState(null);
+
+  const [action, setAction] =
+    useState('');
+
+  const [error, setError] =
+    useState('');
+
+  const answers = useMemo(() => {
+    return Array.isArray(
+      agentResult?.answers
+    )
+      ? agentResult.answers
+      : [];
+  }, [agentResult]);
+
+  const reviewAnswers =
+    answers.filter(answer => {
+      return (
+        hasValue(answer.value) &&
+        answer.requiresReview
+      );
+    });
+
+  const unresolvedAnswers =
+    answers.filter(answer => {
+      return !hasValue(answer.value);
+    });
+
+  const appliedAnswers =
+    answers.filter(answer => {
+      return (
+        hasValue(answer.value) &&
+        !answer.requiresReview
+      );
+    });
+
+  const loadStorage = async () => {
+    const stored =
+      await readStorage(STORAGE_KEYS);
+
+    setProfile(
+      stored.profileData || null
+    );
+
+    setScan(
+      stored.lastPageScan || null
+    );
+
+    setAgentResult(
+      stored.lastAgent2Result || null
+    );
+
+    setRunState(
+      stored.agent2RunState || null
+    );
+  };
+
+  const refreshProfile = async () => {
+    const response =
+      await sendRuntimeMessage({
+        action: 'FETCH_PROFILE_DATA'
+      });
+
+    if (response?.success) {
+      setProfile(response.data);
+    }
+  };
+
+  const scanCurrentPage = async () => {
+    setAction('scanning');
+    setError('');
+
+    const response =
+      await sendToActivePage(
+        'FASTAPPLY_SCAN_PAGE'
+      );
+
+    if (response?.success) {
+      setScan(response.data);
+      setAgentResult(null);
+    } else {
+      setError(
+        response?.error ||
+        'The page could not be scanned.'
+      );
+    }
+
+    setAction('');
+  };
+
+  const fillMissingFields = async () => {
+    setAction('filling');
+    setError('');
+
+    const response =
+      await sendToActivePage(
+        'FASTAPPLY_RUN_AGENT2'
+      );
+
+    if (response?.success) {
+      setScan(
+        response.data?.scan || scan
+      );
+
+      setAgentResult(
+        response.data?.result || null
+      );
+    } else {
+      setError(
+        response?.error ||
+        'Agent 2 could not fill the page.'
+      );
+    }
+
+    setAction('');
+  };
+
+  useEffect(() => {
+    loadStorage();
+    refreshProfile();
+
+    const storageListener = (
+      changes,
+      areaName
+    ) => {
+      if (areaName !== 'local') return;
+
+      if (changes.profileData) {
+        setProfile(
+          changes.profileData.newValue ||
+          null
+        );
+      }
+
+      if (changes.lastPageScan) {
+        setScan(
+          changes.lastPageScan.newValue ||
+          null
+        );
+      }
+
+      if (changes.lastAgent2Result) {
+        setAgentResult(
+          changes.lastAgent2Result
+            .newValue || null
+        );
+      }
+
+      if (changes.agent2RunState) {
+        setRunState(
+          changes.agent2RunState
+            .newValue || null
+        );
+      }
+    };
+
+    chrome.storage.onChanged.addListener(
+      storageListener
+    );
+
+    return () => {
+      chrome.storage.onChanged.removeListener(
+        storageListener
+      );
+    };
+  }, []);
+
+  const isBusy =
+    action !== '' ||
+    runState?.status === 'analysing';
+
+  return (
+    <div className="min-h-screen bg-slate-950 pb-8 text-slate-100">
+      <header className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/95 p-4 backdrop-blur">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="bg-gradient-to-r from-cyan-400 to-indigo-400 bg-clip-text text-lg font-black text-transparent">
+              FastApply Assistant
+            </h1>
+
+            <p className="mt-1 text-[9px] font-bold uppercase tracking-widest text-slate-600">
+              Manual AI application controls
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={loadStorage}
+            className="rounded-xl border border-slate-800 bg-slate-900 p-2.5 text-slate-500 hover:text-cyan-400"
+          >
+            <RefreshCw className="h-4 w-4" />
+          </button>
         </div>
 
-      </div>
+        <div className="mt-4 grid grid-cols-2 rounded-xl bg-slate-900 p-1">
+          <button
+            type="button"
+            onClick={() => setView('controls')}
+            className={`rounded-lg px-3 py-2.5 text-xs font-bold ${
+              view === 'controls'
+                ? 'bg-indigo-500/20 text-indigo-300'
+                : 'text-slate-500'
+            }`}
+          >
+            AI Controls
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setView('profile')}
+            className={`rounded-lg px-3 py-2.5 text-xs font-bold ${
+              view === 'profile'
+                ? 'bg-cyan-500/20 text-cyan-300'
+                : 'text-slate-500'
+            }`}
+          >
+            Profile Copy
+          </button>
+        </div>
+      </header>
+
+      <main className="space-y-4 p-4">
+        {view === 'profile' ? (
+          <ProfileCopy profile={profile} />
+        ) : (
+          <>
+            {error && (
+              <div className="flex gap-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs leading-5 text-red-300">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                {error}
+              </div>
+            )}
+
+            <section className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+              <h2 className="font-bold text-white">
+                Application Page
+              </h2>
+
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                The ATS engine fills known fields automatically. Scan only after the form has loaded.
+              </p>
+
+              <div className="mt-4 grid grid-cols-1 gap-3">
+                <button
+                  type="button"
+                  onClick={scanCurrentPage}
+                  disabled={isBusy}
+                  className="flex items-center justify-center gap-2 rounded-xl bg-cyan-600 px-4 py-3 font-bold text-white transition hover:bg-cyan-500 disabled:opacity-50"
+                >
+                  {action === 'scanning' ? (
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                  ) : (
+                    <Search className="h-5 w-5" />
+                  )}
+
+                  Scan Current Page
+                </button>
+
+                <button
+                  type="button"
+                  onClick={fillMissingFields}
+                  disabled={
+                    isBusy ||
+                    !scan ||
+                    scan.missingFields === 0
+                  }
+                  className="flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-fuchsia-600 px-4 py-3 font-bold text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {action === 'filling' ||
+                  runState?.status ===
+                    'analysing' ? (
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                  ) : (
+                    <Bot className="h-5 w-5" />
+                  )}
+
+                  Fill Missing with Agent 2
+                </button>
+              </div>
+            </section>
+
+            {scan && (
+              <section className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-cyan-500">
+                      {scan.atsPlatform}
+                    </p>
+
+                    <h3 className="mt-1 truncate font-bold text-white">
+                      {scan.jobContext?.jobTitle ||
+                        scan.pageTitle ||
+                        'Job Application'}
+                    </h3>
+
+                    <p className="mt-1 truncate text-xs text-slate-500">
+                      {scan.jobContext?.company ||
+                        'Company not detected'}
+                    </p>
+                  </div>
+
+                  <span className="shrink-0 text-[10px] text-slate-600">
+                    {formatDate(scan.scannedAt)}
+                  </span>
+                </div>
+
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  <Metric
+                    label="Total"
+                    value={scan.totalFields}
+                    className="border-slate-700 bg-slate-950 text-slate-300"
+                  />
+
+                  <Metric
+                    label="Auto Filled"
+                    value={scan.scriptFilled}
+                    className="border-cyan-500/30 bg-cyan-500/10 text-cyan-400"
+                  />
+
+                  <Metric
+                    label="Missing"
+                    value={scan.missingFields}
+                    className="border-amber-500/30 bg-amber-500/10 text-amber-400"
+                  />
+                </div>
+
+                {scan.fields?.length > 0 && (
+                  <div className="mt-4">
+                    <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-600">
+                      Missing fields
+                    </p>
+
+                    <div className="max-h-64 space-y-2 overflow-y-auto custom-scrollbar">
+                      {scan.fields.map(field => (
+                        <div
+                          key={field.fieldId}
+                          className="rounded-xl border border-slate-800 bg-slate-950/70 p-3"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <p className="text-xs font-semibold leading-5 text-slate-300">
+                              {field.label}
+                            </p>
+
+                            <span className="shrink-0 rounded bg-slate-800 px-2 py-1 text-[9px] uppercase text-slate-500">
+                              {field.type}
+                            </span>
+                          </div>
+
+                          {field.required && (
+                            <p className="mt-1 text-[9px] font-bold uppercase text-red-400">
+                              Required
+                            </p>
+                          )}
+
+                          {field.options?.length > 0 && (
+                            <p className="mt-2 text-[10px] text-slate-600">
+                              {field.options.length} available options
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {scan.missingFields === 0 && (
+                  <div className="mt-4 flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300">
+                    <CheckCircle2 className="h-4 w-4" />
+                    No empty supported fields were found.
+                  </div>
+                )}
+              </section>
+            )}
+
+            {runState?.status ===
+              'analysing' && (
+              <div className="flex items-center gap-3 rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-4 text-indigo-300">
+                <Loader2 className="h-5 w-5 animate-spin" />
+
+                <p className="text-xs font-semibold">
+                  Agent 2 is analysing the current page.
+                </p>
+              </div>
+            )}
+
+            {agentResult && (
+              <section className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+                <h3 className="font-bold text-white">
+                  Agent 2 Result
+                </h3>
+
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  <Metric
+                    label="Applied"
+                    value={
+                      agentResult.appliedFields
+                    }
+                    className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                  />
+
+                  <Metric
+                    label="Review"
+                    value={
+                      agentResult.reviewRequiredFields
+                    }
+                    className="border-amber-500/30 bg-amber-500/10 text-amber-400"
+                  />
+
+                  <Metric
+                    label="Unresolved"
+                    value={
+                      agentResult.unresolvedAfterApply
+                    }
+                    className="border-red-500/30 bg-red-500/10 text-red-400"
+                  />
+                </div>
+
+                {reviewAnswers.length > 0 && (
+                  <div className="mt-5">
+                    <p className="mb-2 flex items-center text-xs font-bold text-amber-400">
+                      <CircleAlert className="mr-2 h-4 w-4" />
+                      Review Required
+                    </p>
+
+                    <div className="space-y-2">
+                      {reviewAnswers.map(answer => (
+                        <CopyField
+                          key={answer.fieldId}
+                          label={answer.label}
+                          value={answer.value}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {unresolvedAnswers.length >
+                  0 && (
+                  <div className="mt-5">
+                    <p className="mb-2 flex items-center text-xs font-bold text-red-400">
+                      <CircleX className="mr-2 h-4 w-4" />
+                      Unresolved
+                    </p>
+
+                    <div className="space-y-2">
+                      {unresolvedAnswers.map(
+                        answer => (
+                          <div
+                            key={answer.fieldId}
+                            className="rounded-xl border border-red-500/20 bg-red-500/5 p-3"
+                          >
+                            <p className="text-xs font-semibold text-slate-300">
+                              {answer.label}
+                            </p>
+
+                            <p className="mt-1 text-[10px] leading-5 text-red-300/70">
+                              {answer.reviewReason ||
+                                'No supported answer was found.'}
+                            </p>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {appliedAnswers.length > 0 && (
+                  <div className="mt-5">
+                    <p className="mb-2 flex items-center text-xs font-bold text-emerald-400">
+                      <CheckCircle2 className="mr-2 h-4 w-4" />
+                      Applied Answers
+                    </p>
+
+                    <div className="space-y-2">
+                      {appliedAnswers.map(answer => (
+                        <CopyField
+                          key={answer.fieldId}
+                          label={answer.label}
+                          value={answer.value}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+            )}
+
+            {!scan && (
+              <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/30 p-7 text-center">
+                <Zap className="mx-auto h-8 w-8 text-cyan-500" />
+
+                <p className="mt-3 font-bold text-white">
+                  Ready to scan
+                </p>
+
+                <p className="mt-2 text-xs leading-5 text-slate-500">
+                  Open a job application form, wait for deterministic autofill, then scan the current page.
+                </p>
+              </div>
+            )}
+          </>
+        )}
+      </main>
     </div>
   );
 }
 
-ReactDOM.createRoot(document.getElementById('sidepanel-root')).render(
+ReactDOM.createRoot(
+  document.getElementById('sidepanel-root')
+).render(
   <React.StrictMode>
     <SidePanel />
   </React.StrictMode>

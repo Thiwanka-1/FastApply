@@ -1,8 +1,18 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import axios from 'axios';
-import { User, MapPin, Globe, Briefcase, GraduationCap, Shield, FileText, Save, Loader2, CheckCircle2 } from 'lucide-react';
+import {
+  User,
+  MapPin,
+  Globe,
+  Briefcase,
+  GraduationCap,
+  Shield,
+  FileText,
+  Save,
+  Loader2,
+  CheckCircle2
+} from 'lucide-react';
 
-// Import our new sub-components
 import PersonalInfo from '../components/profile/PersonalInfo';
 import ContactInfo from '../components/profile/ContactInfo';
 import WorkHistory from '../components/profile/WorkHistory';
@@ -10,70 +20,218 @@ import EducationHistory from '../components/profile/EducationHistory';
 import WebsitesSkills from '../components/profile/WebsitesSkills';
 import EEOInfo from '../components/profile/EEOInfo';
 import ResumeUpload from '../components/profile/ResumeUpload';
+
+const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+
+const normalizeProfile = profile => ({
+  ...profile,
+
+  personalInfo: {
+    firstName: '',
+    lastName: '',
+    preferredName: '',
+    pronouns: '',
+    ...(profile?.personalInfo || {}),
+    languages: Array.isArray(profile?.personalInfo?.languages)
+      ? profile.personalInfo.languages
+      : []
+  },
+
+  contactInfo: {
+    email: '',
+    phone: '',
+    addressLine1: '',
+    addressLine2: '',
+    city: '',
+    state: '',
+    country: '',
+    postalCode: '',
+    ...(profile?.contactInfo || {})
+  },
+
+  websitesAndSkills: {
+    linkedin: '',
+    github: '',
+    twitter: '',
+    portfolio: '',
+    ...(profile?.websitesAndSkills || {}),
+    skills: Array.isArray(profile?.websitesAndSkills?.skills)
+      ? profile.websitesAndSkills.skills
+      : []
+  },
+
+  workHistory: Array.isArray(profile?.workHistory)
+    ? profile.workHistory.map(job => ({
+        jobTitle: '',
+        company: '',
+        location: '',
+        employmentType: '',
+        currentlyWorkHere: false,
+        startDate: '',
+        endDate: '',
+        description: '',
+        ...job,
+        currentlyWorkHere: job?.currentlyWorkHere === true
+      }))
+    : [],
+
+  educationHistory: Array.isArray(profile?.educationHistory)
+    ? profile.educationHistory.map(education => ({
+        school: '',
+        institutionLocation: '',
+        degree: '',
+        major: '',
+        minor: '',
+        gpa: '',
+        gpaScale: '',
+        startDate: '',
+        endDate: '',
+        ...education
+      }))
+    : [],
+
+  eeo: {
+    optOut: false,
+    authorizedToWork: '',
+    requireVisaNow: '',
+    requireVisaFuture: '',
+    disability: '',
+    veteran: '',
+    gender: '',
+    ethnicity: '',
+    race: '',
+    age: '',
+    ...(profile?.eeo || {}),
+    optOut: profile?.eeo?.optOut === true
+  },
+
+  resume: profile?.resume || {},
+  cqfo: profile?.cqfo || {},
+  coverLetter: profile?.coverLetter || {}
+});
+
+const buildProfileSavePayload = profile => ({
+  personalInfo: profile.personalInfo,
+  contactInfo: profile.contactInfo,
+  websitesAndSkills: profile.websitesAndSkills,
+  workHistory: profile.workHistory,
+  educationHistory: profile.educationHistory,
+  eeo: profile.eeo
+});
+
+const syncExtensionProfileCache = profile => {
+  try {
+    globalThis.chrome?.storage?.local?.set({
+      profileData: profile,
+      profileFetchedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.warn('Could not refresh the extension profile cache:', error);
+  }
+};
+
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState('personal');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [lastSaved, setLastSaved] = useState('');
-  
-  // The master state holding the EXACT structure of your Mongoose Profile.js model
-  const [profileData, setProfileData] = useState(null);
+  const [profileData, setProfileData] = useState(() => normalizeProfile({}));
 
-  const API_URL = import.meta.env.VITE_API_BASE_URL;
-  axios.defaults.withCredentials = true;
-
-  // 1. Fetch Profile on Load
   useEffect(() => {
     const fetchProfile = async () => {
       try {
-        const { data } = await axios.get(`${API_URL}/api/profile`);
-        setProfileData(data);
-      } catch (err) {
-        console.error('Failed to load profile');
+        const { data } = await axios.get(`${API_URL}/api/profile`, {
+          withCredentials: true
+        });
+
+        const normalizedProfile = normalizeProfile(data);
+        setProfileData(normalizedProfile);
+        syncExtensionProfileCache(normalizedProfile);
+      } catch (error) {
+        console.error(
+          'Failed to load profile:',
+          error.response?.data?.message || error.message
+        );
+
+        setProfileData(normalizeProfile({}));
       } finally {
         setLoading(false);
       }
     };
-    fetchProfile();
-  }, [API_URL]);
 
-  // 2. Global Save Function
+    fetchProfile();
+  }, []);
+
   const handleSave = async () => {
     setSaving(true);
+
     try {
-      const { data } = await axios.put(`${API_URL}/api/profile`, profileData);
-      setProfileData(data);
+      const payload = buildProfileSavePayload(profileData);
+
+      const { data } = await axios.put(`${API_URL}/api/profile`, payload, {
+        withCredentials: true
+      });
+
+      const normalizedProfile = normalizeProfile(data);
+      setProfileData(normalizedProfile);
+      syncExtensionProfileCache(normalizedProfile);
+
       const now = new Date();
-      setLastSaved(`Saved at ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
-    } catch (err) {
-      console.error('Failed to save');
+      setLastSaved(
+        `Saved at ${now.toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit'
+        })}`
+      );
+    } catch (error) {
+      console.error(
+        'Failed to save profile:',
+        error.response?.data?.message || error.message
+      );
     } finally {
       setSaving(false);
     }
   };
 
-  // 3. The Universal State Updater for Child Components
-  // Function for standard Object sections (personalInfo, contactInfo, etc.)
-const updateSection = (section, field, value) => {
-  setProfileData(prev => ({
-    ...prev,
-    [section]: { ...prev[section], [field]: value }
-  }));
-};
+  const handleProfileRebuilt = rebuiltProfile => {
+    const normalizedProfile = normalizeProfile(rebuiltProfile);
 
-// ADD THIS: Specific function for Array sections (workHistory, educationHistory, etc.)
-const updateArraySection = (section, value) => {
-  setProfileData(prev => ({
-    ...prev,
-    [section]: value // We replace the whole array directly
-  }));
-};
+    setProfileData(normalizedProfile);
+    syncExtensionProfileCache(normalizedProfile);
+
+    const now = new Date();
+    setLastSaved(
+      `Extracted at ${now.toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit'
+      })}`
+    );
+  };
+
+  const updateSection = (section, field, value) => {
+    setProfileData(previous => ({
+      ...previous,
+      [section]: {
+        ...(previous?.[section] || {}),
+        [field]: value
+      }
+    }));
+  };
+
+  const updateArraySection = (section, value) => {
+    setProfileData(previous => ({
+      ...previous,
+      [section]: Array.isArray(value) ? value : []
+    }));
+  };
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center h-full">
-        <Loader2 className="w-12 h-12 text-indigo-500 animate-spin mb-4" />
-        <p className="text-indigo-400 tracking-widest text-sm uppercase animate-pulse">Initializing Data Core...</p>
+      <div className="flex h-full flex-col items-center justify-center">
+        <Loader2 className="mb-4 h-12 w-12 animate-spin text-indigo-500" />
+        <p className="animate-pulse text-sm uppercase tracking-widest text-indigo-400">
+          Initializing Data Core...
+        </p>
       </div>
     );
   }
@@ -85,40 +243,50 @@ const updateArraySection = (section, value) => {
     { id: 'work', label: 'Work History', icon: Briefcase },
     { id: 'education', label: 'Education', icon: GraduationCap },
     { id: 'eeo', label: 'Equal Opportunity', icon: Shield },
-    { id: 'resume', label: 'Resume Upload', icon: FileText },
+    { id: 'documents', label: 'AI Documents', icon: FileText }
   ];
 
+  const activeNavigationItem = navItems.find(item => item.id === activeTab);
+
   return (
-    <div className="max-w-7xl mx-auto h-full flex flex-col lg:flex-row gap-8 pb-10">
-      
-      {/* MODERN FLOATING SIDEBAR */}
-      <div className="lg:w-72 shrink-0">
-        <div className="sticky top-0 bg-slate-900/40 backdrop-blur-xl border border-slate-800/50 rounded-3xl p-4 shadow-2xl">
-          
+    <div className="mx-auto flex h-full max-w-7xl flex-col gap-8 pb-10 lg:flex-row">
+      <div className="shrink-0 lg:w-72">
+        <div className="sticky top-0 rounded-3xl border border-slate-800/50 bg-slate-900/40 p-4 shadow-2xl backdrop-blur-xl">
           <div className="mb-6 px-4 pt-2">
-            <h3 className="text-white font-bold text-lg">Profile Completion</h3>
-            <div className="w-full bg-slate-800 rounded-full h-2 mt-3 overflow-hidden">
-              <div className="bg-gradient-to-r from-indigo-500 to-cyan-400 h-2 rounded-full w-1/3"></div>
+            <h3 className="text-lg font-bold text-white">Profile Completion</h3>
+
+            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-800">
+              <div className="h-2 w-1/3 rounded-full bg-gradient-to-r from-indigo-500 to-cyan-400" />
             </div>
           </div>
 
           <nav className="space-y-1">
-            {navItems.map((item) => {
+            {navItems.map(item => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
+
               return (
                 <button
+                  type="button"
                   key={item.id}
                   onClick={() => setActiveTab(item.id)}
-                  className={`w-full flex items-center space-x-3 px-4 py-3.5 rounded-2xl transition-all duration-300 ${
-                    isActive 
-                      ? 'bg-indigo-500/10 text-indigo-400 shadow-[inset_0_0_20px_rgba(99,102,241,0.1)]' 
+                  className={`flex w-full items-center space-x-3 rounded-2xl px-4 py-3.5 transition-all duration-300 ${
+                    isActive
+                      ? 'bg-indigo-500/10 text-indigo-400 shadow-[inset_0_0_20px_rgba(99,102,241,0.1)]'
                       : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
                   }`}
                 >
-                  <Icon className={`w-5 h-5 ${isActive ? 'text-indigo-400' : 'text-slate-500'}`} />
+                  <Icon
+                    className={`h-5 w-5 ${
+                      isActive ? 'text-indigo-400' : 'text-slate-500'
+                    }`}
+                  />
+
                   <span className="font-semibold tracking-wide">{item.label}</span>
-                  {isActive && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-400 shadow-[0_0_8px_rgba(99,102,241,0.8)]"></div>}
+
+                  {isActive && (
+                    <div className="ml-auto h-1.5 w-1.5 rounded-full bg-indigo-400 shadow-[0_0_8px_rgba(99,102,241,0.8)]" />
+                  )}
                 </button>
               );
             })}
@@ -126,49 +294,92 @@ const updateArraySection = (section, value) => {
         </div>
       </div>
 
-      {/* MODERN GLASS CONTENT AREA */}
-      <div className="flex-1 flex flex-col min-h-[600px]">
-        
-        {/* Sticky Action Header */}
-        <div className="sticky top-0 z-20 flex items-center justify-between bg-slate-950/80 backdrop-blur-md pb-4 mb-6 border-b border-slate-800/50">
-          <h2 className="text-2xl font-black text-white capitalize flex items-center">
-            <span className="text-indigo-500 mr-3">///</span> 
-            {navItems.find(i => i.id === activeTab)?.label}
+      <div className="flex min-h-[600px] flex-1 flex-col">
+        <div className="sticky top-0 z-20 mb-6 flex items-center justify-between border-b border-slate-800/50 bg-slate-950/80 pb-4 backdrop-blur-md">
+          <h2 className="flex items-center text-2xl font-black capitalize text-white">
+            <span className="mr-3 text-indigo-500">///</span>
+            {activeNavigationItem?.label}
           </h2>
 
           <div className="flex items-center space-x-4">
-            {lastSaved && <span className="text-xs font-medium text-slate-500 flex items-center"><CheckCircle2 className="w-3 h-3 mr-1 text-green-500"/> {lastSaved}</span>}
-            <button 
+            {lastSaved && (
+              <span className="flex items-center text-xs font-medium text-slate-500">
+                <CheckCircle2 className="mr-1 h-3 w-3 text-green-500" />
+                {lastSaved}
+              </span>
+            )}
+
+            <button
+              type="button"
               onClick={handleSave}
               disabled={saving}
-              className="flex items-center space-x-2 bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white font-bold py-2.5 px-6 rounded-xl shadow-[0_0_20px_rgba(99,102,241,0.3)] transition-all transform hover:-translate-y-0.5 disabled:opacity-50 disabled:transform-none"
+              className="flex transform items-center space-x-2 rounded-xl bg-gradient-to-r from-indigo-600 to-cyan-600 px-6 py-2.5 font-bold text-white shadow-[0_0_20px_rgba(99,102,241,0.3)] transition-all hover:-translate-y-0.5 hover:from-indigo-500 hover:to-cyan-500 disabled:transform-none disabled:opacity-50"
             >
-              {saving ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
+              {saving ? (
+                <Loader2 className="h-5 w-5 animate-spin" />
+              ) : (
+                <Save className="h-5 w-5" />
+              )}
+
               <span>{saving ? 'Syncing...' : 'Save Progress'}</span>
             </button>
           </div>
         </div>
 
-        {/* Dynamic Form Injection */}
-        <div className="animate-in slide-in-from-right-4 fade-in duration-500">
-          {activeTab === 'personal' && <PersonalInfo data={profileData.personalInfo} updateSection={updateSection} />}
-          {activeTab === 'contact' && <ContactInfo data={profileData.contactInfo} updateSection={updateSection} />}
-          {activeTab === 'work' && (
-            <WorkHistory 
-              data={profileData.workHistory} 
-              updateSection={updateArraySection} // Change this
+        <div className="animate-in fade-in slide-in-from-right-4 duration-500">
+          {activeTab === 'personal' && (
+            <PersonalInfo
+              data={profileData.personalInfo}
+              updateSection={updateSection}
             />
           )}
-          {activeTab === 'education' && (
-            <EducationHistory 
-              data={profileData.educationHistory} 
-              updateSection={updateArraySection} // Change this
-            />
-          )}
-          {activeTab === 'websites' && <WebsitesSkills data={profileData.websitesAndSkills} updateSection={updateSection} />}
-          {activeTab === 'eeo' && <EEOInfo data={profileData.eeo} updateSection={updateSection} />}
-          {activeTab === 'resume' && <ResumeUpload data={profileData.resume} updateSection={updateSection} />}        </div>
 
+          {activeTab === 'contact' && (
+            <ContactInfo
+              data={profileData.contactInfo}
+              updateSection={updateSection}
+            />
+          )}
+
+          {activeTab === 'work' && (
+            <WorkHistory
+              data={profileData.workHistory}
+              updateSection={updateArraySection}
+            />
+          )}
+
+          {activeTab === 'education' && (
+            <EducationHistory
+              data={profileData.educationHistory}
+              updateSection={updateArraySection}
+            />
+          )}
+
+          {activeTab === 'websites' && (
+            <WebsitesSkills
+              data={profileData.websitesAndSkills}
+              updateSection={updateSection}
+            />
+          )}
+
+          {activeTab === 'eeo' && (
+            <EEOInfo
+              data={profileData.eeo}
+              updateSection={updateSection}
+            />
+          )}
+
+          {activeTab === 'documents' && (
+            <ResumeUpload
+              documents={{
+                resume: profileData.resume,
+                cqfo: profileData.cqfo,
+                coverLetter: profileData.coverLetter
+              }}
+              onProfileRebuilt={handleProfileRebuilt}
+            />
+          )}
+        </div>
       </div>
     </div>
   );

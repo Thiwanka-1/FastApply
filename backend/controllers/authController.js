@@ -1,3 +1,4 @@
+//authController.js
 import User from '../models/User.js';
 import Profile from '../models/Profile.js';
 import generateToken from '../utils/generateToken.js';

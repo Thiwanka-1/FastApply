@@ -1,3 +1,4 @@
+//firebaseStorageService.js
 import { deleteObject, ref } from 'firebase/storage';
 import { storage } from '../config/firebase.js';
 

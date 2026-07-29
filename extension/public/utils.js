@@ -653,6 +653,587 @@ const fillCheckbox = (checkboxNodeList, targetText) => {
   return clickedAnything;
 };
 
+const agentFieldRegistry = new Map();
+
+const hashAgentText = value => {
+  const text = String(value ?? "");
+  let hash = 0;
+
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(index);
+    hash |= 0;
+  }
+
+  return Math.abs(hash).toString(36);
+};
+
+const isElementVisible = element => {
+  if (!element?.isConnected) return false;
+
+  const style = window.getComputedStyle(element);
+
+  if (
+    style.display === "none" ||
+    style.visibility === "hidden" ||
+    Number(style.opacity) === 0
+  ) {
+    return false;
+  }
+
+  const rect = element.getBoundingClientRect();
+
+  return rect.width > 0 && rect.height > 0;
+};
+
+const getOptionLabel = element => {
+  if (!element) return "";
+
+  if (element.id) {
+    try {
+      const label = document.querySelector(
+        `label[for="${CSS.escape(element.id)}"]`
+      );
+
+      if (label) return getElementText(label);
+    } catch (_) {}
+  }
+
+  const wrappingLabel = element.closest("label");
+
+  return (
+    getElementText(wrappingLabel) ||
+    normalizeValue(element.getAttribute?.("aria-label")) ||
+    normalizeValue(element.value)
+  );
+};
+
+const getGroupQuestionText = elements => {
+  const first = Array.from(elements || [])[0];
+
+  if (!first) return "";
+
+  const fieldset = first.closest("fieldset");
+  const legend = fieldset?.querySelector("legend");
+
+  if (legend) {
+    return getElementText(legend);
+  }
+
+  const group = first.closest(
+    '[role="group"], [role="radiogroup"], [class*="question"], [class*="form-group"], [class*="field"]'
+  );
+
+  if (group) {
+    const heading = group.querySelector(
+      'legend, label, [class*="label"], [class*="question"], h1, h2, h3, h4'
+    );
+
+    if (heading && !heading.contains(first)) {
+      return getElementText(heading);
+    }
+  }
+
+  return getLabelText(first);
+};
+
+const createAgentFieldId = (type, elements, label) => {
+  const first = Array.from(elements || [])[0];
+
+  const identity = [
+    window.location.pathname,
+    type,
+    first?.id || "",
+    first?.name || "",
+    label
+  ].join("|");
+
+  let fieldId = `fa_${type}_${hashAgentText(identity)}`;
+  let suffix = 1;
+
+  while (
+    agentFieldRegistry.has(fieldId) &&
+    agentFieldRegistry.get(fieldId)?.elements?.[0] !== first
+  ) {
+    fieldId = `fa_${type}_${hashAgentText(identity)}_${suffix}`;
+    suffix += 1;
+  }
+
+  return fieldId;
+};
+
+const registerAgentField = ({
+  type,
+  elements,
+  label,
+  options = [],
+  required = false,
+  maxLength = null
+}) => {
+  const normalizedElements = Array.from(elements || [])
+    .filter(Boolean);
+
+  if (normalizedElements.length === 0) return null;
+
+  const fieldId = createAgentFieldId(
+    type,
+    normalizedElements,
+    label
+  );
+
+  normalizedElements.forEach(element => {
+    element.dataset.fa_agent_field_id = fieldId;
+  });
+
+  agentFieldRegistry.set(fieldId, {
+    type,
+    elements: normalizedElements,
+    label,
+    options,
+    required,
+    maxLength
+  });
+
+  return {
+    fieldId,
+    label,
+    type,
+    required,
+    options,
+    currentValue: "",
+    maxLength
+  };
+};
+
+const isStandardFieldEmpty = element => {
+  if (!element) return false;
+
+  if (element.matches('[contenteditable="true"]')) {
+    return !normalizeValue(element.innerText);
+  }
+
+  if (element.tagName === "SELECT") {
+    const selected = element.options?.[element.selectedIndex];
+
+    return (
+      !selected ||
+      !normalizeValue(selected.value) ||
+      selected.disabled
+    );
+  }
+
+  return !normalizeValue(element.value);
+};
+
+const shouldCollectAgentField = element => {
+  if (!element || !isElementVisible(element)) return false;
+
+  if (
+    element.disabled ||
+    element.readOnly ||
+    element.dataset.fa_filled === "true" ||
+    element.dataset.fa_agent_processed === "true"
+  ) {
+    return false;
+  }
+
+  return isStandardFieldEmpty(element);
+};
+
+const collectUnresolvedFields = (root = document) => {
+  const fields = [];
+
+  const standardSelector = [
+    'input:not([type="hidden"])',
+    'input:not([type="radio"])',
+    'input:not([type="checkbox"])',
+    "select",
+    "textarea",
+    '[contenteditable="true"]'
+  ].join(",");
+
+  const excludedInputTypes = new Set([
+    "hidden",
+    "radio",
+    "checkbox",
+    "file",
+    "password",
+    "submit",
+    "button",
+    "reset",
+    "image"
+  ]);
+
+  root.querySelectorAll(standardSelector).forEach(element => {
+    const inputType = normalizeText(
+      element.getAttribute?.("type") || ""
+    );
+
+    if (
+      element.tagName === "INPUT" &&
+      excludedInputTypes.has(inputType)
+    ) {
+      return;
+    }
+
+    if (!shouldCollectAgentField(element)) return;
+
+    const label = normalizeValue(getLabelText(element));
+
+    if (!label) return;
+
+    const type = element.matches('[contenteditable="true"]')
+      ? "textarea"
+      : element.tagName === "SELECT"
+        ? "select"
+        : element.tagName === "TEXTAREA"
+          ? "textarea"
+          : inputType || "text";
+
+    const options = element.tagName === "SELECT"
+      ? Array.from(element.options || [])
+          .filter(option => {
+            return (
+              !option.disabled &&
+              normalizeValue(option.value) &&
+              normalizeValue(option.text)
+            );
+          })
+          .map(option => normalizeValue(option.text))
+      : [];
+
+    const maxLengthValue = Number(element.maxLength);
+    const maxLength =
+      Number.isFinite(maxLengthValue) &&
+      maxLengthValue > 0
+        ? maxLengthValue
+        : null;
+
+    const field = registerAgentField({
+      type,
+      elements: [element],
+      label,
+      options,
+      required:
+        element.required ||
+        element.getAttribute("aria-required") === "true",
+      maxLength
+    });
+
+    if (field) fields.push(field);
+  });
+
+  const radioGroups = new Map();
+
+  root.querySelectorAll('input[type="radio"]').forEach(radio => {
+    if (
+      !isElementVisible(radio) ||
+      radio.disabled ||
+      radio.dataset.fa_filled === "true" ||
+      radio.dataset.fa_agent_processed === "true"
+    ) {
+      return;
+    }
+
+    const key =
+      radio.name ||
+      radio.closest("fieldset")?.id ||
+      `radio_${hashAgentText(getGroupQuestionText([radio]))}`;
+
+    if (!radioGroups.has(key)) {
+      radioGroups.set(key, []);
+    }
+
+    radioGroups.get(key).push(radio);
+  });
+
+  radioGroups.forEach(radios => {
+    if (radios.some(radio => radio.checked)) return;
+
+    const label = normalizeValue(
+      getGroupQuestionText(radios)
+    );
+
+    const options = radios
+      .map(getOptionLabel)
+      .filter(Boolean);
+
+    if (!label || options.length === 0) return;
+
+    const field = registerAgentField({
+      type: "radio",
+      elements: radios,
+      label,
+      options,
+      required: radios.some(radio => radio.required)
+    });
+
+    if (field) fields.push(field);
+  });
+
+  const checkboxGroups = new Map();
+
+  root
+    .querySelectorAll('input[type="checkbox"]')
+    .forEach(checkbox => {
+      if (
+        !isElementVisible(checkbox) ||
+        checkbox.disabled ||
+        checkbox.dataset.fa_filled === "true" ||
+        checkbox.dataset.fa_agent_processed === "true"
+      ) {
+        return;
+      }
+
+      const key = checkbox.name
+        ? `checkbox_name_${checkbox.name}`
+        : `checkbox_id_${checkbox.id || hashAgentText(getLabelText(checkbox))}`;
+
+      if (!checkboxGroups.has(key)) {
+        checkboxGroups.set(key, []);
+      }
+
+      checkboxGroups.get(key).push(checkbox);
+    });
+
+  checkboxGroups.forEach(checkboxes => {
+    if (checkboxes.some(checkbox => checkbox.checked)) return;
+
+    const label = normalizeValue(
+      checkboxes.length === 1
+        ? getLabelText(checkboxes[0])
+        : getGroupQuestionText(checkboxes)
+    );
+
+    const options = checkboxes.length === 1
+      ? ["Yes", "No"]
+      : checkboxes.map(getOptionLabel).filter(Boolean);
+
+    if (!label) return;
+
+    const field = registerAgentField({
+      type: "checkbox",
+      elements: checkboxes,
+      label,
+      options,
+      required: checkboxes.some(checkbox => checkbox.required)
+    });
+
+    if (field) fields.push(field);
+  });
+
+  return fields;
+};
+
+const markAgentState = (
+  elements,
+  state,
+  reason = ""
+) => {
+  Array.from(elements || []).forEach(element => {
+    element.dataset.fa_agent_processed = "true";
+    element.dataset.fa_agent_state = state;
+    element.dataset.fa_agent_reason = reason;
+
+    try {
+      if (state === "review") {
+        element.style.border = "2px solid #f59e0b";
+        element.style.backgroundColor = "#fffbeb";
+      } else if (state === "unresolved") {
+        element.style.border = "2px dashed #ef4444";
+        element.style.backgroundColor = "#fef2f2";
+      }
+    } catch (_) {}
+  });
+};
+
+const fillContentEditable = (element, value) => {
+  const normalized = normalizeValue(value);
+
+  if (!element || !normalized) return false;
+
+  try {
+    element.focus();
+    element.textContent = normalized;
+    element.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        data: normalized,
+        inputType: "insertText"
+      })
+    );
+    element.dispatchEvent(
+      new Event("change", { bubbles: true })
+    );
+    element.blur();
+
+    markFilled(element, "contenteditable");
+    return true;
+  } catch (error) {
+    console.warn(
+      "[FastApply] fillContentEditable failed:",
+      error
+    );
+
+    return false;
+  }
+};
+
+const fillSingleCheckboxAnswer = (
+  checkbox,
+  value
+) => {
+  const yesNo = classifyYesNo(value);
+
+  if (!checkbox || !yesNo) return false;
+
+  try {
+    if (yesNo === "yes" && !checkbox.checked) {
+      checkbox.click();
+      checkbox.dispatchEvent(
+        new Event("change", { bubbles: true })
+      );
+    }
+
+    if (yesNo === "no" && checkbox.checked) {
+      checkbox.click();
+      checkbox.dispatchEvent(
+        new Event("change", { bubbles: true })
+      );
+    }
+
+    markFilled(checkbox, "checkbox");
+    return true;
+  } catch (_) {
+    return false;
+  }
+};
+
+const fillAgentAnswer = answer => {
+  const field = agentFieldRegistry.get(answer?.fieldId);
+
+  if (!field) {
+    return {
+      filled: false,
+      unresolved: true
+    };
+  }
+
+  const value = answer?.value;
+  const hasValue =
+    Array.isArray(value)
+      ? value.length > 0
+      : normalizeValue(value).length > 0;
+
+  if (!hasValue) {
+    markAgentState(
+      field.elements,
+      "unresolved",
+      answer?.reviewReason ||
+        "No supported answer was available."
+    );
+
+    return {
+      filled: false,
+      unresolved: true
+    };
+  }
+
+  let filled = false;
+
+  if (field.type === "select") {
+    filled = fillDropdown(field.elements[0], value);
+  } else if (field.type === "radio") {
+    filled = fillRadio(field.elements, value);
+  } else if (field.type === "checkbox") {
+    if (field.elements.length === 1) {
+      filled = fillSingleCheckboxAnswer(
+        field.elements[0],
+        value
+      );
+    } else {
+      const targetValues = Array.isArray(value)
+        ? value
+        : String(value)
+            .split(/[;,|]/)
+            .map(item => item.trim())
+            .filter(Boolean);
+
+      filled = targetValues.some(target => {
+        return fillCheckbox(field.elements, target);
+      });
+    }
+  } else if (
+    field.elements[0]?.matches('[contenteditable="true"]')
+  ) {
+    filled = fillContentEditable(
+      field.elements[0],
+      value
+    );
+  } else {
+    filled = fillField(field.elements[0], value);
+  }
+
+  if (!filled) {
+    markAgentState(
+      field.elements,
+      "unresolved",
+      "The answer could not be applied to this field."
+    );
+
+    return {
+      filled: false,
+      unresolved: true
+    };
+  }
+
+  field.elements.forEach(element => {
+    element.dataset.fa_agent_filled = "true";
+    element.dataset.fa_agent_source =
+      answer.source || "unknown";
+  });
+
+  if (answer.requiresReview) {
+    markAgentState(
+      field.elements,
+      "review",
+      answer.reviewReason || "Review required."
+    );
+  } else {
+    markAgentState(field.elements, "filled");
+  }
+
+  return {
+    filled: true,
+    unresolved: false
+  };
+};
+
+const applyAgentAnswers = answers => {
+  const summary = {
+    answered: 0,
+    reviewRequired: 0,
+    unresolved: 0
+  };
+
+  (answers || []).forEach(answer => {
+    const result = fillAgentAnswer(answer);
+
+    if (result.filled) {
+      summary.answered += 1;
+    }
+
+    if (answer?.requiresReview) {
+      summary.reviewRequired += 1;
+    }
+
+    if (result.unresolved) {
+      summary.unresolved += 1;
+    }
+  });
+
+  return summary;
+};
+
 window.FastApplyUtils = {
   normalizeValue,
   escapeRegex,
@@ -663,4 +1244,6 @@ window.FastApplyUtils = {
   fillDropdown,
   fillRadio,
   fillCheckbox,
+  collectUnresolvedFields,
+  applyAgentAnswers
 };

@@ -1172,6 +1172,71 @@ const normalizeGpaFields = (item) => {
   return { gpa, gpaScale };
 };
 
+const getExtractedCertificationIndexes = answers => {
+  const indexes = new Set();
+
+  (Array.isArray(answers) ? answers : []).forEach(item => {
+    const key = cleanText(item?.key);
+    const value = item?.answer;
+
+    const hasValue = Array.isArray(value)
+      ? value.length > 0
+      : value !== '' && value !== null && value !== undefined;
+
+    if (!hasValue) return;
+
+    const match = key.match(
+      /^certification(\d+)(name|issuer|dateachieved|expirationdate)$/i
+    );
+
+    if (!match) return;
+
+    const index = Number(match[1]);
+
+    if (Number.isInteger(index) && index > 0 && index <= 5) {
+      indexes.add(index);
+    }
+  });
+
+  return [...indexes].sort((first, second) => first - second);
+};
+
+const getExtractedReferenceIndexes = answers => {
+  const indexes = new Set();
+
+  (Array.isArray(answers) ? answers : []).forEach(item => {
+    const key = cleanText(item?.key);
+    const value = item?.answer;
+
+    const hasValue = Array.isArray(value)
+      ? value.length > 0
+      : value !== '' &&
+        value !== null &&
+        value !== undefined;
+
+    if (!hasValue) return;
+
+    const match = key.match(
+      /^reference0*(\d+)(fullName|relationship|company|jobTitle|phone|email)$/i
+    );
+
+    if (!match) return;
+
+    const index = Number(match[1]);
+
+    if (
+      Number.isInteger(index) &&
+      index > 0 &&
+      index <= 3
+    ) {
+      indexes.add(index);
+    }
+  });
+
+  return [...indexes].sort(
+    (first, second) => first - second
+  );
+};
 
 const validateExtractedProfile = (
   profileData,
@@ -1182,38 +1247,64 @@ const validateExtractedProfile = (
   const resumeText = documentText.resume || '';
   const cqfoText = documentText.cqfo || '';
 
-  if (resumeText.trim() && profileData.workHistory.length === 0) {
-    errors.push('No work history was extracted from the resume.');
+  if (
+    resumeText.trim() &&
+    profileData.workHistory.length === 0
+  ) {
+    errors.push(
+      'No work history was extracted from the resume.'
+    );
   }
 
   if (
     /education/i.test(resumeText) &&
     profileData.educationHistory.length === 0
   ) {
-    errors.push('No education history was extracted.');
+    errors.push(
+      'No education history was extracted.'
+    );
   }
 
   if (
     !profileData.personalInfo.firstName &&
     !profileData.personalInfo.lastName
   ) {
-    errors.push('The candidate name was not extracted.');
+    errors.push(
+      'The candidate name was not extracted.'
+    );
   }
 
   if (usedCqfoVision) {
+    const memoryAnswers = Array.isArray(
+      profileData.applicationMemory?.answers
+    )
+      ? profileData.applicationMemory.answers
+      : [];
+
     const memoryKeys = new Set(
-      profileData.applicationMemory.answers.map(item => {
-        return cleanText(item.key)
+      memoryAnswers.map(item => {
+        return cleanText(item?.key)
           .toLowerCase()
           .replace(/[^a-z0-9]/g, '');
       })
     );
 
-    const requireKey = (condition, key, label) => {
-      const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const requireKey = (
+      condition,
+      key,
+      label
+    ) => {
+      const normalizedKey = key
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '');
 
-      if (condition && !memoryKeys.has(normalizedKey)) {
-        errors.push(`${label} was not extracted from the CQFO.`);
+      if (
+        condition &&
+        !memoryKeys.has(normalizedKey)
+      ) {
+        errors.push(
+          `${label} was not extracted from the CQFO.`
+        );
       }
     };
 
@@ -1236,13 +1327,17 @@ const validateExtractedProfile = (
     );
 
     requireKey(
-      /citizen of another country|permanent residency/i.test(cqfoText),
+      /citizen of another country|permanent residency/i.test(
+        cqfoText
+      ),
       'otherCitizenshipOrResidency',
       'Citizenship or permanent-residency answer'
     );
 
     requireKey(
-      /legally authorized to work in the USA/i.test(cqfoText),
+      /legally authorized to work in the USA/i.test(
+        cqfoText
+      ),
       'authorizedToWorkUSA',
       'United States work authorization'
     );
@@ -1254,7 +1349,9 @@ const validateExtractedProfile = (
     );
 
     requireKey(
-      /agreement or covenant not to compete/i.test(cqfoText),
+      /agreement or covenant not to compete/i.test(
+        cqfoText
+      ),
       'employmentAgreement',
       'Employment-agreement answer'
     );
@@ -1266,48 +1363,112 @@ const validateExtractedProfile = (
     );
 
     requireKey(
-      /dates and time ranges.*interview/i.test(cqfoText),
+      /dates and time ranges.*interview/i.test(
+        cqfoText
+      ),
       'interviewAvailability',
       'Interview availability'
     );
 
-    const referenceMatches = cqfoText.match(/\*?Reference\s*0?\d+/gi) || [];
-    const referenceCount = Math.min(new Set(referenceMatches.map(item => {
-      return item.toLowerCase().replace(/[^0-9]/g, '');
-    })).size, 3);
+    /*
+ * Do not count "Reference 1", "Reference 2" and
+ * "Reference 3" labels in the raw PDF text.
+ *
+ * CQFO templates can contain empty reference sections.
+ * A printed section label does not prove that the user
+ * entered a complete reference.
+ *
+ * Partial reference extraction should be preserved and
+ * missing fields should remain unavailable to Agent 2,
+ * rather than rejecting the complete profile upload.
+ */
+const referenceIndexes =
+  getExtractedReferenceIndexes(memoryAnswers);
 
-    for (let index = 1; index <= referenceCount; index++) {
-      requireKey(
-        true,
-        `reference${index}FullName`,
-        `Reference ${index} full name`
+const incompleteReferences = referenceIndexes
+  .map(index => {
+    const requiredFields = [
+      {
+        key: `reference${index}FullName`,
+        label: 'full name'
+      },
+      {
+        key: `reference${index}Phone`,
+        label: 'phone'
+      }
+    ];
+
+    const missingFields = requiredFields
+      .filter(field => {
+        const normalizedKey = field.key
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, '');
+
+        return !memoryKeys.has(normalizedKey);
+      })
+      .map(field => field.label);
+
+    return {
+      index,
+      missingFields
+    };
+  })
+  .filter(reference => {
+    return reference.missingFields.length > 0;
+  });
+
+if (incompleteReferences.length > 0) {
+  const warningDetails = incompleteReferences
+    .map(reference => {
+      return (
+        `Reference ${reference.index}: ` +
+        reference.missingFields.join(', ')
+      );
+    })
+    .join('; ');
+
+  console.warn(
+    '[FastApply] Some reference fields were not extracted: ' +
+    `${warningDetails}. The available reference data will ` +
+    'still be saved.'
+  );
+}
+
+    /*
+     * Do not count certification labels in the raw PDF text.
+     * PDF forms commonly contain multiple empty certification
+     * template rows, so label count does not equal populated count.
+     *
+     * Validate only certification indexes for which Agent 1
+     * extracted at least one meaningful certification value.
+     */
+    const certificationIndexes =
+      getExtractedCertificationIndexes(
+        memoryAnswers
       );
 
-      requireKey(
-        true,
-        `reference${index}Phone`,
-        `Reference ${index} phone`
-      );
-    }
-
-    const certificationMatches =
-      cqfoText.match(/License\/Certification name/gi) || [];
-
-    for (
-      let index = 1;
-      index <= Math.min(certificationMatches.length, 5);
-      index++
-    ) {
+    certificationIndexes.forEach(index => {
       requireKey(
         true,
         `certification${index}Name`,
         `Certification ${index} name`
       );
+    });
 
-      requireKey(
-        true,
-        `certification${index}Issuer`,
-        `Certification ${index} issuer`
+    const missingIssuerIndexes =
+      certificationIndexes.filter(index => {
+        const issuerKey =
+          `certification${index}issuer`;
+
+        return !memoryKeys.has(issuerKey);
+      });
+
+    if (missingIssuerIndexes.length > 0) {
+      console.warn(
+        '[FastApply] Certification issuer was not extracted for ' +
+        `entries: ${missingIssuerIndexes.join(', ')}. ` +
+        'The profile will still be saved because issuer fields ' +
+        'may be blank in the CQFO.'
       );
     }
   }

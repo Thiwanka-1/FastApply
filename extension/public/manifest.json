@@ -33,6 +33,7 @@
       ],
       "js": [
         "utils.js",
+        "agent2-controller.js",
         "greenhouse.js"
       ],
       "run_at": "document_idle",
@@ -103,9 +104,18 @@
         "https://*.rippling-ats.com/*",
         "https://*.rippling.com/*",
         "https://*.myworkdayjobs.com/*",
-        "https://*.icims.com/*"
+        "https://*.icims.com/*",
+        "https://*.smartrecruiters.com/*",
+        "https://jobs.smartrecruiters.com/*",
+        "https://careers.smartrecruiters.com/*",
+        "https://*.eightfold.ai/*",
+        "https://app.eightfold.ai/*"
       ],
-      "js": ["utils.js", "generic.js"],
+      "js": [
+        "utils.js",
+        "agent2-controller.js",
+        "generic.js"
+      ],
 
       "run_at": "document_idle",
       "all_frames": true
