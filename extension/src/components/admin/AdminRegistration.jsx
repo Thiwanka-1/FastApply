@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import axios from 'axios';
+import { API_URL } from '../../config';
 import { ShieldPlus, CheckCircle2, AlertTriangle, Eye, EyeOff, Loader2 } from 'lucide-react';
 
 export default function AdminRegistration() {
@@ -10,7 +11,6 @@ export default function AdminRegistration() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState({ type: '', text: '' });
 
-  const API_URL = import.meta.env.VITE_API_BASE_URL;
 
   const handleRegisterAdmin = async (e) => {
     e.preventDefault();

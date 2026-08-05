@@ -20,31 +20,63 @@ const fillRipplingCombobox = (inputElement, targetValue) => {
 
   // 3. Wait for portal to render, then select
   setTimeout(() => {
-    const options = document.querySelectorAll('[role="presentation"] li, [role="listbox"] li, [role="option"]');
-    let matchedOption = null;
+    const options = Array.from(
+      document.querySelectorAll(
+        '[role="presentation"] li, [role="listbox"] li, [role="option"]'
+      )
+    );
+    const normalizedTarget = String(targetValue).trim().toLowerCase();
+    let matchedOption = options.find(option => {
+      return String(option.innerText || option.textContent)
+        .trim()
+        .toLowerCase() === normalizedTarget;
+    });
 
-    for (let i = 0; i < options.length; i++) {
-      // FIX: Seamlessly using the smartMatch function already provided by your utils.js!
-      if (smartMatch(options[i].innerText, targetValue)) {
-        matchedOption = options[i];
-        break;
+    if (!matchedOption) {
+      const semanticMatches = options.filter(option => {
+        return window.FastApplyUtils.smartMatch(
+          option.innerText || option.textContent,
+          targetValue
+        );
+      });
+
+      if (semanticMatches.length === 1) {
+        matchedOption = semanticMatches[0];
       }
     }
 
     if (matchedOption) {
       matchedOption.click();
-      inputElement.style.border = '2px solid #8b5cf6';
-      inputElement.dataset.fa_filled = "true";
+
+      setTimeout(() => {
+        const selectedValue = String(inputElement.value || "")
+          .trim()
+          .toLowerCase();
+        const selectionConfirmed =
+          inputElement.getAttribute("aria-expanded") === "false" ||
+          matchedOption.getAttribute("aria-selected") === "true" ||
+          !matchedOption.isConnected;
+
+        if (selectedValue === normalizedTarget && selectionConfirmed) {
+          inputElement.style.border = '2px solid #8b5cf6';
+          inputElement.dataset.fa_filled = "true";
+        }
+
+        inputElement.dataset.fa_dropdown_processing = "false";
+      }, 180);
     } else {
-      inputElement.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown', keyCode: 40 }));
-      inputElement.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', keyCode: 13 }));
-      document.body.click(); 
-      inputElement.dataset.fa_filled = "true";
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          key: 'Escape',
+          code: 'Escape'
+        })
+      );
+      inputElement.dataset.fa_dropdown_processing = "false";
     }
-    inputElement.dataset.fa_dropdown_processing = "false";
   }, 600);
 
-  return true;
+  return false;
 };
 
 // --- RIPPLING BESPOKE RADIO CLICKER ---
@@ -52,14 +84,30 @@ const fillRipplingRadios = (radioNodes, targetValue) => {
     if (!radioNodes || radioNodes.length === 0 || !targetValue) return false;
     let clicked = false;
 
-    radioNodes.forEach(radio => {
+    const radios = Array.from(radioNodes);
+    const exactMatches = radios.filter(radio => {
+        const wrapper = radio.closest('[data-testid^="radio-label-"]');
+        const labelText = wrapper ? wrapper.innerText : (radio.parentElement.innerText || '');
+        return labelText.trim().toLowerCase() === targetValue.trim().toLowerCase();
+    });
+
+    const matches = exactMatches.length > 0
+      ? exactMatches
+      : radios.filter(radio => {
+          const wrapper = radio.closest('[data-testid^="radio-label-"]');
+          const labelText = wrapper ? wrapper.innerText : (radio.parentElement.innerText || '');
+          return window.FastApplyUtils.smartMatch(labelText, targetValue);
+        });
+
+    if (matches.length !== 1) return false;
+
+    matches.forEach(radio => {
         if (radio.dataset.fa_filled === "true") return;
         
         const wrapper = radio.closest('[data-testid^="radio-label-"]');
         const labelText = wrapper ? wrapper.innerText : (radio.parentElement.innerText || '');
 
-        // FIX: Seamlessly using the smartMatch function already provided by your utils.js!
-        if (smartMatch(labelText, targetValue)) {
+        if (window.FastApplyUtils.smartMatch(labelText, targetValue)) {
             if (!radio.checked) radio.click();
             if (wrapper) {
                 wrapper.style.backgroundColor = '#f0fdfa';
@@ -70,7 +118,7 @@ const fillRipplingRadios = (radioNodes, targetValue) => {
         }
     });
 
-    if (clicked) radioNodes.forEach(r => r.dataset.fa_filled = "true");
+    if (clicked) radios.forEach(r => r.dataset.fa_filled = "true");
     return clicked;
 };
 
@@ -184,6 +232,11 @@ const startEngine = () => {
     }, 500);
   });
 };
+
+window.FastApplyAgent2Controller?.register({
+  atsPlatform: "rippling",
+  runDeterministic: attemptAutofill
+});
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startEngine);
 else startEngine();

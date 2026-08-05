@@ -1093,7 +1093,7 @@ const cleanFieldOptions = (options) => {
     options
       .map(option => typeof option === 'string' ? option.trim() : option?.label?.trim())
       .filter(Boolean)
-  )].slice(0, 50);
+  )].slice(0, 250);
 };
 
 const normalizeApplicationFields = (fields) => {
@@ -1101,7 +1101,7 @@ const normalizeApplicationFields = (fields) => {
 
   const usedIds = new Set();
 
-  return fields.slice(0, 40).map((field, index) => {
+  return fields.slice(0, 100).map((field, index) => {
     const item = typeof field === 'string' ? { label: field } : field;
     const label = cleanText(item?.label || item?.question);
     let fieldId = cleanText(item?.fieldId || item?.id || item?.name);
@@ -1622,7 +1622,56 @@ const validateAgentEvidence = ({
   return false;
 };
 
-const matchApplicationOption = (value, options) => {
+const getApplicationOptionPolarity = value => {
+  const normalized = normalizeComparable(value);
+
+  if (!normalized) return '';
+
+  if (
+    /\bnot a veteran\b|\bhave not served\b|\bnot protected veteran\b|\bdo not\b|\bdont\b|^no\b|^false$/.test(
+      normalized
+    )
+  ) {
+    return 'no';
+  }
+
+  if (
+    /^yes\b|^true$|\bi am a veteran\b|\bprotected veteran\b/.test(
+      normalized
+    )
+  ) {
+    return 'yes';
+  }
+
+  return '';
+};
+
+const getApplicationOptionWords = value => {
+  const stopWords = new Set([
+    'a', 'an', 'the', 'i', 'am', 'as', 'of', 'to', 'in',
+    'and', 'or', 'have', 'has', 'my'
+  ]);
+
+  return new Set(
+    normalizeComparable(value)
+      .split(' ')
+      .filter(word => word.length > 1 && !stopWords.has(word))
+  );
+};
+
+const countApplicationOptionOverlap = (first, second) => {
+  const firstWords = getApplicationOptionWords(first);
+  const secondWords = getApplicationOptionWords(second);
+  let overlap = 0;
+
+  firstWords.forEach(word => {
+    if (secondWords.has(word)) overlap += 1;
+  });
+
+  return overlap;
+};
+
+const matchSingleApplicationOption = (value, options) => {
   if (!Array.isArray(options) || options.length === 0) {
     return value;
   }
@@ -1637,43 +1686,70 @@ const matchApplicationOption = (value, options) => {
 
   if (exactMatch !== undefined) return exactMatch;
 
-  const yesValue = /^(yes|true|1)$/.test(normalizedValue);
-  const noValue = /^(no|false|0)$/.test(normalizedValue);
+  const wantsDecline =
+    /\bdecline\b|\bprefer not\b|\bdont wish\b|\bdo not wish\b|\bchoose not\b/.test(
+      normalizedValue
+    );
 
-  if (yesValue) {
-    const yesOption = options.find(option => {
-      const normalizedOption = normalizeComparable(option);
-
-      return normalizedOption === 'yes' ||
-        normalizedOption.startsWith('yes ') ||
-        normalizedOption.includes('i am authorised') ||
-        normalizedOption.includes('i am authorized');
+  if (wantsDecline) {
+    const declineOptions = options.filter(option => {
+      return /\bdecline\b|\bprefer not\b|\bdont wish\b|\bdo not wish\b|\bchoose not\b/.test(
+        normalizeComparable(option)
+      );
     });
 
-    if (yesOption !== undefined) return yesOption;
+    if (declineOptions.length === 1) return declineOptions[0];
   }
 
-  if (noValue) {
-    const noOption = options.find(option => {
-      const normalizedOption = normalizeComparable(option);
+  const polarity = getApplicationOptionPolarity(value);
 
-      return normalizedOption === 'no' ||
-        normalizedOption.startsWith('no ') ||
-        normalizedOption.includes('not authorised') ||
-        normalizedOption.includes('not authorized');
+  if (polarity) {
+    const polarityOptions = options.filter(option => {
+      return getApplicationOptionPolarity(option) === polarity;
     });
 
-    if (noOption !== undefined) return noOption;
+    if (polarityOptions.length === 1) return polarityOptions[0];
   }
 
-  const containedMatch = options.find(option => {
+  const containedMatches = options.filter(option => {
     const normalizedOption = normalizeComparable(option);
 
     return normalizedOption.includes(normalizedValue) ||
       normalizedValue.includes(normalizedOption);
   });
 
-  return containedMatch ?? '';
+  if (containedMatches.length === 1) return containedMatches[0];
+
+  const scoredOptions = options
+    .map(option => ({
+      option,
+      score: countApplicationOptionOverlap(value, option)
+    }))
+    .filter(item => item.score > 0)
+    .sort((first, second) => second.score - first.score);
+
+  if (scoredOptions.length === 0) return '';
+
+  if (
+    scoredOptions[1] &&
+    scoredOptions[1].score === scoredOptions[0].score
+  ) {
+    return '';
+  }
+
+  return scoredOptions[0].option;
+};
+
+const matchApplicationOption = (value, options) => {
+  if (Array.isArray(value)) {
+    return [...new Set(
+      value
+        .map(item => matchSingleApplicationOption(item, options))
+        .filter(Boolean)
+    )];
+  }
+
+  return matchSingleApplicationOption(value, options);
 };
 
 const truncateApplicationAnswer = (value, maxLength) => {
@@ -1913,6 +1989,27 @@ const applyAnswerReviewRules = ({
 
 // @desc    Get current user's profile
 // @route   GET /api/profile
+const toClientProfile = profile => {
+  if (!profile) return profile;
+
+  const value = typeof profile.toObject === 'function'
+    ? profile.toObject()
+    : structuredClone(profile);
+
+  ['resume', 'cqfo', 'coverLetter'].forEach(type => {
+    const document = value[type] || {};
+
+    value[type] = {
+      fileName: document.fileName || '',
+      fileUrl: document.fileUrl || '',
+      mimeType: document.mimeType || '',
+      uploadedAt: document.uploadedAt || null
+    };
+  });
+
+  return value;
+};
+
 export const getProfile = async (req, res, next) => {
   try {
     const profile = await Profile.findOne({ user: req.user._id });
@@ -1920,7 +2017,7 @@ export const getProfile = async (req, res, next) => {
       res.status(404);
       throw new Error('Profile not found');
     }
-    res.status(200).json(profile);
+    res.status(200).json(toClientProfile(profile));
   } catch (error) { next(error); }
 };
 
@@ -1928,10 +2025,32 @@ export const getProfile = async (req, res, next) => {
 // @route   PUT /api/profile
 export const updateProfile = async (req, res, next) => {
   try {
-    // Finds the profile and updates only the fields provided in req.body
+    const allowedSections = [
+      'personalInfo',
+      'contactInfo',
+      'websitesAndSkills',
+      'workHistory',
+      'educationHistory',
+      'eeo'
+    ];
+
+    const updatePayload = {};
+
+    allowedSections.forEach(section => {
+      if (Object.prototype.hasOwnProperty.call(req.body, section)) {
+        updatePayload[section] = req.body[section];
+      }
+    });
+
+    if (Object.keys(updatePayload).length === 0) {
+      return res.status(400).json({
+        message: 'No supported profile sections were provided.'
+      });
+    }
+
     const updatedProfile = await Profile.findOneAndUpdate(
       { user: req.user._id },
-      { $set: req.body },
+      { $set: updatePayload },
       { new: true, runValidators: true }
     );
 
@@ -1940,7 +2059,7 @@ export const updateProfile = async (req, res, next) => {
       throw new Error('Profile not found');
     }
 
-    res.status(200).json(updatedProfile);
+    res.status(200).json(toClientProfile(updatedProfile));
   } catch (error) { next(error); }
 };
 
@@ -1991,7 +2110,7 @@ export const uploadResume = async (req, res, next) => {
 
     res.status(200).json({
       message: 'Resume replaced successfully.',
-      resume: profile.resume
+      resume: toClientProfile(profile).resume
     });
   } catch (error) {
     if (newStoragePath) {
@@ -2021,7 +2140,10 @@ export const clearEntireProfile = async (req, res, next) => {
       { new: true }
     );
 
-    res.status(200).json({ message: 'Entire profile cleared', profile: updatedProfile });
+    res.status(200).json({
+      message: 'Entire profile cleared',
+      profile: toClientProfile(updatedProfile)
+    });
   } catch (error) { next(error); }
 };
 
@@ -2053,7 +2175,10 @@ export const clearProfileSection = async (req, res, next) => {
       { new: true }
     );
 
-    res.status(200).json({ message: `${sectionName} cleared successfully`, profile: updatedProfile });
+    res.status(200).json({
+      message: `${sectionName} cleared successfully`,
+      profile: toClientProfile(updatedProfile)
+    });
   } catch (error) { next(error); }
 };
 
@@ -2199,7 +2324,7 @@ export const parseDocumentsAndPopulateProfile = async (req, res, next) => {
     res.status(200).json({
       message: 'Documents replaced and profile rebuilt successfully.',
       replacedDocuments: uploadedTypes,
-      profile: updatedProfile
+      profile: toClientProfile(updatedProfile)
     });
   } catch (error) {
     for (const storagePath of newlyUploadedPaths) {

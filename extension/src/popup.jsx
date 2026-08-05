@@ -17,14 +17,7 @@ import {
   CircleX
 } from 'lucide-react';
 import './index.css';
-
-const API_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  'http://localhost:5000';
-
-const FRONTEND_URL =
-  import.meta.env.VITE_API_BASE_URL1 ||
-  'http://localhost:5173';
+import { API_URL, DASHBOARD_URL } from './config';
 
 const hasChromeStorage = () => {
   return (
@@ -42,6 +35,20 @@ const writeLocalStorage = values => {
 
     chrome.storage.local.set(
       values,
+      resolve
+    );
+  });
+};
+
+const clearCachedProfile = () => {
+  return new Promise(resolve => {
+    if (!hasChromeStorage()) {
+      resolve();
+      return;
+    }
+
+    chrome.storage.local.remove(
+      ['profileData', 'profileFetchedAt'],
       resolve
     );
   });
@@ -103,6 +110,7 @@ function Popup() {
         });
       } catch (_) {
         setIsLoggedIn(false);
+        await clearCachedProfile();
       }
     };
 
@@ -180,7 +188,7 @@ function Popup() {
 
   const openDashboard = hash => {
     window.open(
-      `${FRONTEND_URL}/#${hash}`,
+      `${DASHBOARD_URL}#${hash}`,
       '_blank'
     );
   };
@@ -215,7 +223,8 @@ function Popup() {
     }
 
     window.open(
-      `${FRONTEND_URL}/sidepanel.html`,
+      globalThis.chrome?.runtime?.getURL?.('sidepanel.html') ||
+        `${DASHBOARD_URL}/sidepanel.html`,
       'FastApply Assistant',
       'width=430,height=800'
     );

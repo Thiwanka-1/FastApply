@@ -1,7 +1,18 @@
 //background.js
 console.log("[FastApply] Background Service Worker Active.");
 
-const API_URL = "http://localhost:5000";
+const DEFAULT_API_URL = "http://localhost:5000";
+
+const getApiUrl = () => {
+  return new Promise(resolve => {
+    chrome.storage.local.get(["apiBaseUrl"], values => {
+      resolve(
+        String(values.apiBaseUrl || DEFAULT_API_URL)
+          .replace(/\/$/, "")
+      );
+    });
+  });
+};
 
 const readJsonResponse = async response => {
   try {
@@ -15,7 +26,8 @@ const apiRequest = async (path, options = {}) => {
   const { method = "GET", body } = options;
 
   try {
-    const response = await fetch(`${API_URL}${path}`, {
+    const apiUrl = await getApiUrl();
+    const response = await fetch(`${apiUrl}${path}`, {
       method,
       credentials: "include",
       headers: {
@@ -66,6 +78,11 @@ const fetchProfileData = async () => {
       profileData: result.data,
       profileFetchedAt: new Date().toISOString()
     });
+  } else if (result.status === 401) {
+    chrome.storage.local.remove([
+      "profileData",
+      "profileFetchedAt"
+    ]);
   }
 
   return result;
@@ -105,6 +122,29 @@ const answerApplicationFields = async payload => {
   return result;
 };
 
+const syncApplicationAnswers = async payload => {
+  if (
+    !payload?.applicationId ||
+    !Array.isArray(payload.answers)
+  ) {
+    return {
+      success: false,
+      error: "Application ID and answers are required for synchronization"
+    };
+  }
+
+  return apiRequest(
+    `/api/applications/${encodeURIComponent(payload.applicationId)}/answers`,
+    {
+      method: "PATCH",
+      body: {
+        answers: payload.answers,
+        syncAppliedAnswers: true
+      }
+    }
+  );
+};
+
 chrome.runtime.onMessage.addListener(
   (request, sender, sendResponse) => {
     if (!request?.action) {
@@ -125,6 +165,12 @@ chrome.runtime.onMessage.addListener(
         case "ANSWER_APPLICATION_FIELDS":
           sendResponse(
             await answerApplicationFields(request.payload)
+          );
+          break;
+
+        case "SYNC_APPLICATION_ANSWERS":
+          sendResponse(
+            await syncApplicationAnswers(request.payload)
           );
           break;
 

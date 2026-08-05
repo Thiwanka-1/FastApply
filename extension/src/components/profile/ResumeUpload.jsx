@@ -11,8 +11,7 @@ import {
   X,
   Sparkles
 } from 'lucide-react';
-
-const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+import { API_URL } from '../../config';
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 

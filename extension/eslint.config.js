@@ -15,7 +15,10 @@ export default defineConfig([
     ],
     languageOptions: {
       ecmaVersion: 2020,
-      globals: globals.browser,
+      globals: {
+        ...globals.browser,
+        chrome: 'readonly',
+      },
       parserOptions: {
         ecmaVersion: 'latest',
         ecmaFeatures: { jsx: true },
@@ -23,7 +26,26 @@ export default defineConfig([
       },
     },
     rules: {
-      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      'no-unused-vars': [
+        'error',
+        {
+          varsIgnorePattern: '^[A-Z_]',
+          argsIgnorePattern: '^_',
+          caughtErrors: 'none',
+        },
+      ],
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      'react-hooks/set-state-in-effect': 'off',
+    },
+  },
+  {
+    files: [
+      'src/popup.jsx',
+      'src/sidepanel.jsx',
+      'src/context/AuthContext.jsx',
+    ],
+    rules: {
+      'react-refresh/only-export-components': 'off',
     },
   },
 ])

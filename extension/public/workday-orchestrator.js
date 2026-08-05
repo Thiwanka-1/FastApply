@@ -181,6 +181,21 @@ const getCurrentPage = () => {
   return "UNKNOWN";
 };
 
+const runWorkdayDeterministic = profile => {
+  const currentPage = getCurrentPage();
+
+  switch (currentPage) {
+    case "PERSONAL_INFO":
+      return window.WorkdayEngine.handlePersonalInfo?.(profile);
+    case "EXPERIENCE_EDUCATION":
+      return window.WorkdayEngine.handleExperience?.(profile);
+    case "EEO_DISCLOSURES":
+      return window.WorkdayEngine.handleEEO?.(profile);
+    default:
+      return false;
+  }
+};
+
 // --- MAIN LOOP ---
 const startEngine = () => {
   chrome.storage.local.get(["autofillEnabled", "profileData"], (res) => {
@@ -200,23 +215,16 @@ const startEngine = () => {
 
       // If either is true, run the page logic!
       if (needsFilling || needsExpanding) {
-        const currentPage = getCurrentPage();
-        
-        switch(currentPage) {
-          case "PERSONAL_INFO":
-            if(window.WorkdayEngine.handlePersonalInfo) window.WorkdayEngine.handlePersonalInfo(res.profileData);
-            break;
-          case "EXPERIENCE_EDUCATION":
-            if(window.WorkdayEngine.handleExperience) window.WorkdayEngine.handleExperience(res.profileData);
-            break;
-          case "EEO_DISCLOSURES":
-            if(window.WorkdayEngine.handleEEO) window.WorkdayEngine.handleEEO(res.profileData);
-            break;
-        }
+        runWorkdayDeterministic(res.profileData);
       }
     }, 1500);
   });
 };
+
+window.FastApplyAgent2Controller?.register({
+  atsPlatform: "workday",
+  runDeterministic: runWorkdayDeterministic
+});
 
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", startEngine);

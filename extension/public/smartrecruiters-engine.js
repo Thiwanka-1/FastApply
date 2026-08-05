@@ -241,6 +241,19 @@ const startSREngine = () => {
     });
 };
 
+const runSmartRecruitersDeterministic = async profile => {
+    window.SREngine.fillPersonalInfo(profile);
+    window.SREngine.fillProfiles(profile);
+
+    await window.SREngine.handleExperience(profile.workHistory);
+    await window.SREngine.handleEducation(profile.educationHistory);
+};
+
+window.FastApplyAgent2Controller?.register({
+    atsPlatform: "smartrecruiters",
+    runDeterministic: runSmartRecruitersDeterministic
+});
+
 if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", startSREngine);
 } else {

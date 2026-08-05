@@ -9,61 +9,44 @@ const fillReactDropdown = (fieldWrapper, targetValue) => {
 
   const nativeSelect = fieldWrapper.querySelector('select');
   if (nativeSelect) {
-    for (let i = 0; i < nativeSelect.options.length; i++) {
-      if (smartMatch(nativeSelect.options[i].text, targetValue)) {
-        nativeSelect.value = nativeSelect.options[i].value;
-        nativeSelect.dispatchEvent(new Event('change', { bubbles: true }));
-        fieldWrapper.dataset.fa_filled = "true";
-        fieldWrapper.style.border = '2px solid #8b5cf6';
-        return true;
-      }
-    }
-    fieldWrapper.dataset.fa_filled = "true"; 
-    return false;
+    const availableOptions = Array.from(nativeSelect.options || [])
+      .filter(option => !option.disabled && option.value)
+      .map(option => option.text.trim())
+      .filter(Boolean);
+
+    const exactOption = resolveGreenhouseOption(
+      targetValue,
+      availableOptions,
+      getGreenhouseFieldLabel(fieldWrapper)
+    );
+
+    if (!exactOption) return false;
+
+    const option = Array.from(nativeSelect.options || []).find(item => {
+      return normalizeGreenhouseText(item.text) ===
+        normalizeGreenhouseText(exactOption);
+    });
+
+    if (!option) return false;
+
+    nativeSelect.value = option.value;
+    nativeSelect.dispatchEvent(new Event('input', { bubbles: true }));
+    nativeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const selected = nativeSelect.options?.[nativeSelect.selectedIndex];
+    const verified = normalizeGreenhouseText(selected?.text) ===
+      normalizeGreenhouseText(exactOption);
+
+    if (!verified) return false;
+
+    fieldWrapper.dataset.fa_filled = "true";
+    fieldWrapper.style.border = '2px solid #8b5cf6';
+    return true;
   }
 
-  const reactContainer = fieldWrapper.querySelector('[class*="-container"]');
-  if (reactContainer) {
-    const control = reactContainer.querySelector('[class*="-control"]') || reactContainer.firstElementChild;
-    const toggleBtn = reactContainer.querySelector('button[aria-label="Toggle flyout"]');
-    const clickTarget = toggleBtn || control;
-
-    if (clickTarget) {
-      fieldWrapper.dataset.fa_dropdown_processing = "true"; 
-
-      clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-      clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-      clickTarget.click();
-
-      setTimeout(() => {
-        let matchedOption = null;
-        const options = document.querySelectorAll('[id*="-option"], [class*="-option"]');
-
-        for (let i = 0; i < options.length; i++) {
-          if (smartMatch(options[i].innerText, targetValue)) {
-            matchedOption = options[i];
-            break;
-          }
-        }
-
-        if (matchedOption) {
-          matchedOption.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-          matchedOption.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-          matchedOption.click();
-          
-          fieldWrapper.style.border = '2px solid #8b5cf6';
-          fieldWrapper.style.borderRadius = '4px';
-        } else {
-          document.body.click(); 
-        }
-        
-        fieldWrapper.dataset.fa_filled = "true";
-        fieldWrapper.dataset.fa_dropdown_processing = "false"; 
-      }, 250);
-
-      return true; 
-    }
-  }
+  // Custom React comboboxes are deliberately left to the manual shared
+  // scanner. It can read the complete live option list before deciding,
+  // while a deterministic guess cannot safely distinguish split EEO values.
   return false;
 };
 
@@ -511,9 +494,30 @@ const getGreenhouseOptionElements = listbox => {
   ).filter(isGreenhouseVisible);
 };
 
+const getGreenhouseScrollContainer = listbox => {
+  if (!listbox) return null;
+
+  const candidates = [
+    listbox,
+    ...Array.from(listbox.querySelectorAll("*"))
+  ].filter(element => {
+    return element.scrollHeight > element.clientHeight + 2;
+  });
+
+  return candidates.sort((first, second) => {
+    return (
+      second.scrollHeight - second.clientHeight
+    ) - (
+      first.scrollHeight - first.clientHeight
+    );
+  })[0] || listbox;
+};
+
 const readAllGreenhouseOptions =
   async listbox => {
     const options = new Set();
+    const scrollContainer =
+      getGreenhouseScrollContainer(listbox);
 
     const collectVisibleOptions = () => {
       getGreenhouseOptionElements(
@@ -537,46 +541,48 @@ const readAllGreenhouseOptions =
 
     collectVisibleOptions();
 
-    if (
-      !listbox ||
-      listbox.scrollHeight <=
-        listbox.clientHeight
-    ) {
+    if (!scrollContainer) {
       return [...options];
     }
 
     const originalScrollTop =
-      listbox.scrollTop;
+      scrollContainer.scrollTop;
 
-    let previousScrollTop = -1;
+    scrollContainer.scrollTop = 0;
+    scrollContainer.dispatchEvent(
+      new Event("scroll", { bubbles: true })
+    );
+    await waitForGreenhouse(80);
+
+    let unchangedPasses = 0;
+    let previousScrollTop =
+      scrollContainer.scrollTop;
+    let previousOptionCount = -1;
 
     for (
       let attempt = 0;
-      attempt < 15;
+      attempt < 100;
       attempt += 1
     ) {
       collectVisibleOptions();
 
       const atBottom =
-        listbox.scrollTop +
-          listbox.clientHeight >=
-        listbox.scrollHeight - 2;
+        scrollContainer.scrollTop +
+          scrollContainer.clientHeight >=
+        scrollContainer.scrollHeight - 2;
 
       if (atBottom) break;
 
-      previousScrollTop =
-        listbox.scrollTop;
-
-      listbox.scrollTop = Math.min(
-        listbox.scrollHeight,
-        listbox.scrollTop +
+      scrollContainer.scrollTop = Math.min(
+        scrollContainer.scrollHeight,
+        scrollContainer.scrollTop +
           Math.max(
             120,
-            listbox.clientHeight * 0.8
+            scrollContainer.clientHeight * 0.8
           )
       );
 
-      listbox.dispatchEvent(
+      scrollContainer.dispatchEvent(
         new Event("scroll", {
           bubbles: true
         })
@@ -585,19 +591,26 @@ const readAllGreenhouseOptions =
       await waitForGreenhouse(80);
 
       if (
-        listbox.scrollTop ===
-        previousScrollTop
+        scrollContainer.scrollTop === previousScrollTop &&
+        options.size === previousOptionCount
       ) {
-        break;
+        unchangedPasses += 1;
+      } else {
+        unchangedPasses = 0;
       }
+
+      if (unchangedPasses >= 2) break;
+
+      previousScrollTop = scrollContainer.scrollTop;
+      previousOptionCount = options.size;
     }
 
     collectVisibleOptions();
 
-    listbox.scrollTop =
+    scrollContainer.scrollTop =
       originalScrollTop;
 
-    listbox.dispatchEvent(
+    scrollContainer.dispatchEvent(
       new Event("scroll", {
         bubbles: true
       })
@@ -1144,37 +1157,91 @@ const resolveGreenhouseOption = (
     return best.option;
   };
 
-const findGreenhouseOptionElement = (
-  options,
+const findRenderedGreenhouseOption = (
+  listbox,
   targetValue
 ) => {
-    const normalizedTarget =
-      normalizeGreenhouseText(
-        targetValue
-      );
+  const normalizedTarget =
+    normalizeGreenhouseText(targetValue);
 
-    return (
-      options.find(option => {
-        return (
-          normalizeGreenhouseText(
-            option.innerText ||
-            option.textContent
-          ) === normalizedTarget
-        );
-      }) ||
-      options.find(option => {
-        return window.FastApplyUtils
-          .smartMatch(
-            cleanGreenhouseText(
-              option.innerText ||
-              option.textContent
-            ),
-            targetValue
-          );
-      }) ||
-      null
+  return getGreenhouseOptionElements(listbox).find(option => {
+    return normalizeGreenhouseText(
+      option.innerText || option.textContent
+    ) === normalizedTarget;
+  }) || null;
+};
+
+const findVirtualizedGreenhouseOption = async (
+  listbox,
+  targetValue
+) => {
+  if (!listbox) return null;
+
+  let match = findRenderedGreenhouseOption(
+    listbox,
+    targetValue
+  );
+
+  if (match) return match;
+
+  const scrollContainer =
+    getGreenhouseScrollContainer(listbox);
+
+  if (!scrollContainer) return null;
+
+  scrollContainer.scrollTop = 0;
+  scrollContainer.dispatchEvent(
+    new Event("scroll", { bubbles: true })
+  );
+  await waitForGreenhouse(80);
+
+  let previousScrollTop = -1;
+  let unchangedPasses = 0;
+
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    match = findRenderedGreenhouseOption(
+      listbox,
+      targetValue
     );
-  };
+
+    if (match) return match;
+
+    const atBottom =
+      scrollContainer.scrollTop +
+        scrollContainer.clientHeight >=
+      scrollContainer.scrollHeight - 2;
+
+    if (atBottom) break;
+
+    const nextScrollTop = Math.min(
+      scrollContainer.scrollHeight,
+      scrollContainer.scrollTop + Math.max(
+        120,
+        scrollContainer.clientHeight * 0.8
+      )
+    );
+
+    if (nextScrollTop === previousScrollTop) {
+      unchangedPasses += 1;
+    } else {
+      unchangedPasses = 0;
+    }
+
+    if (unchangedPasses >= 2) break;
+
+    previousScrollTop = nextScrollTop;
+    scrollContainer.scrollTop = nextScrollTop;
+    scrollContainer.dispatchEvent(
+      new Event("scroll", { bubbles: true })
+    );
+    await waitForGreenhouse(80);
+  }
+
+  return findRenderedGreenhouseOption(
+    listbox,
+    targetValue
+  );
+};
 
 const fillGreenhouseAgentDropdown =
   async (
@@ -1231,14 +1298,9 @@ const fillGreenhouseAgentDropdown =
         openedControl
       );
 
-    const optionElements =
-      getGreenhouseOptionElements(
-        listbox
-      );
-
     const matchedOption =
-      findGreenhouseOptionElement(
-        optionElements,
+      await findVirtualizedGreenhouseOption(
+        listbox,
         target
       );
 

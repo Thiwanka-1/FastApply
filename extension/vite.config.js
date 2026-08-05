@@ -2,9 +2,9 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { resolve } from 'path'
-import { createRequire } from 'module';
+import { fileURLToPath } from 'url'
 
-const require = createRequire(import.meta.url);
+const projectRoot = fileURLToPath(new URL('.', import.meta.url))
 
 export default defineConfig({
   plugins: [
@@ -14,9 +14,9 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
-        options: resolve(__dirname, 'index.html'),      
-        popup: resolve(__dirname, 'popup.html'),        
-        sidepanel: resolve(__dirname, 'sidepanel.html')
+        options: resolve(projectRoot, 'index.html'),
+        popup: resolve(projectRoot, 'popup.html'),
+        sidepanel: resolve(projectRoot, 'sidepanel.html')
       }
     }
   }

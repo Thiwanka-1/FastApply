@@ -216,5 +216,10 @@ const startEngine = () => {
   });
 };
 
+window.FastApplyAgent2Controller?.register({
+  atsPlatform: "ashby",
+  runDeterministic: attemptAutofill
+});
+
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startEngine);
 else startEngine();

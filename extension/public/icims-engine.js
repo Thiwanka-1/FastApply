@@ -210,13 +210,15 @@ window.ICIMSEngine.runAutofill = async (profile) => {
 
         // PAGE 3+: EEO & Visas 
         window.ICIMSEngine.fillSelectDropdown("Gender", e.gender);
-        window.ICIMSEngine.fillSelectDropdown("Race", e.ethnicity); 
+        window.ICIMSEngine.fillSelectDropdown("Race", e.race);
+        window.ICIMSEngine.fillSelectDropdown("Ethnicity", e.ethnicity);
         window.ICIMSEngine.fillSelectDropdown("Disability", e.disability);
         window.ICIMSEngine.fillSelectDropdown("Veteran", e.veteran);
         
         // Fallbacks for Radio variants
         window.ICIMSEngine.fillRadioGroup("Gender", e.gender);
-        window.ICIMSEngine.fillRadioGroup("Race", e.ethnicity); 
+        window.ICIMSEngine.fillRadioGroup("Race", e.race);
+        window.ICIMSEngine.fillRadioGroup("Ethnicity", e.ethnicity);
         window.ICIMSEngine.fillRadioGroup("legally authorized to work", e.authorizedToWork);
 
     } finally {
@@ -232,6 +234,13 @@ const startICIMSEngine = () => {
         }, 1500); 
     });
 };
+
+window.FastApplyAgent2Controller?.register({
+    atsPlatform: "icims",
+    runDeterministic: profile => {
+        return window.ICIMSEngine.runAutofill(profile);
+    }
+});
 
 if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", startICIMSEngine);

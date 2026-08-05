@@ -124,5 +124,10 @@ const startEngine = () => {
   });
 };
 
+window.FastApplyAgent2Controller?.register({
+  atsPlatform: "lever",
+  runDeterministic: attemptAutofill
+});
+
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startEngine);
 else startEngine();

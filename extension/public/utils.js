@@ -358,7 +358,10 @@ const getLabelText = (input) => {
 
   if (!text && input.id) {
     try {
-      const el = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
+      const queryRoot = input.getRootNode?.() || document;
+      const el = queryRoot.querySelector?.(
+        `label[for="${CSS.escape(input.id)}"]`
+      );
       if (el) text = getElementText(el);
     } catch (_) {}
   }
@@ -542,12 +545,19 @@ const fillDropdown = (selectElement, targetValue) => {
     const options = Array.from(selectElement.options || []);
 
     matchedOption =
-      options.find((opt) => smartMatch(opt.text, normalizedTarget)) ||
-      options.find((opt) => smartMatch(opt.value, normalizedTarget)) ||
       options.find((opt) => normalizeText(opt.text) === normalizeText(normalizedTarget)) ||
-      options.find((opt) => normalizeText(opt.value) === normalizeText(normalizedTarget)) ||
-      options.find((opt) => normalizeText(opt.text).includes(normalizeText(normalizedTarget))) ||
-      options.find((opt) => normalizeText(opt.value).includes(normalizeText(normalizedTarget)));
+      options.find((opt) => normalizeText(opt.value) === normalizeText(normalizedTarget));
+
+    if (!matchedOption) {
+      const semanticMatches = options.filter(opt => {
+        return smartMatch(opt.text, normalizedTarget) ||
+          smartMatch(opt.value, normalizedTarget);
+      });
+
+      if (semanticMatches.length === 1) {
+        matchedOption = semanticMatches[0];
+      }
+    }
 
     if (!matchedOption) return false;
 
@@ -572,7 +582,23 @@ const fillRadio = (radioNodeList, targetText) => {
   try {
     const radios = Array.from(radioNodeList);
 
-    for (const radio of radios) {
+    const exactRadio = radios.find(radio => {
+      return radio &&
+        !radio.disabled &&
+        normalizeText(getLabelText(radio)) === normalizeText(normalizedTarget);
+    });
+
+    const semanticRadios = exactRadio
+      ? [exactRadio]
+      : radios.filter(radio => {
+          return radio &&
+            !radio.disabled &&
+            smartMatch(getLabelText(radio), normalizedTarget);
+        });
+
+    if (semanticRadios.length !== 1) return false;
+
+    for (const radio of semanticRadios) {
       if (!radio || radio.disabled) continue;
       if (radio.dataset.fa_filled === "true") continue;
 
@@ -619,7 +645,23 @@ const fillCheckbox = (checkboxNodeList, targetText) => {
   try {
     const checkboxes = Array.from(checkboxNodeList);
 
-    for (const cb of checkboxes) {
+    const exactCheckbox = checkboxes.find(checkbox => {
+      return checkbox &&
+        !checkbox.disabled &&
+        normalizeText(getLabelText(checkbox)) === normalizeText(normalizedTarget);
+    });
+
+    const semanticCheckboxes = exactCheckbox
+      ? [exactCheckbox]
+      : checkboxes.filter(checkbox => {
+          return checkbox &&
+            !checkbox.disabled &&
+            smartMatch(getLabelText(checkbox), normalizedTarget);
+        });
+
+    if (semanticCheckboxes.length !== 1) return false;
+
+    for (const cb of semanticCheckboxes) {
       if (!cb || cb.disabled) continue;
       if (cb.dataset.fa_filled === "true") continue;
 
@@ -683,6 +725,58 @@ const isElementVisible = element => {
   const rect = element.getBoundingClientRect();
 
   return rect.width > 0 && rect.height > 0;
+};
+
+const getAgentQueryRoots = (root = document) => {
+  const roots = [];
+  const pending = [root];
+  const seen = new Set();
+
+  while (pending.length > 0) {
+    const current = pending.shift();
+
+    if (!current || seen.has(current)) continue;
+
+    seen.add(current);
+    roots.push(current);
+
+    current.querySelectorAll?.("*").forEach(element => {
+      if (element.shadowRoot) {
+        pending.push(element.shadowRoot);
+      }
+    });
+  }
+
+  return roots;
+};
+
+const queryAgentElements = (root, selector) => {
+  const elements = new Set();
+
+  getAgentQueryRoots(root).forEach(queryRoot => {
+    queryRoot.querySelectorAll?.(selector).forEach(element => {
+      elements.add(element);
+    });
+  });
+
+  return [...elements];
+};
+
+const isAgentChoiceVisible = element => {
+  if (isElementVisible(element)) return true;
+
+  if (!element?.id) return false;
+
+  try {
+    const queryRoot = element.getRootNode?.() || document;
+    const label = queryRoot.querySelector?.(
+      `label[for="${CSS.escape(element.id)}"]`
+    );
+
+    return isElementVisible(label);
+  } catch (_) {
+    return false;
+  }
 };
 
 const getOptionLabel = element => {
@@ -863,7 +957,7 @@ const collectUnresolvedFields = (root = document) => {
     "image"
   ]);
 
-  root.querySelectorAll(standardSelector).forEach(element => {
+  queryAgentElements(root, standardSelector).forEach(element => {
     const inputType = normalizeText(
       element.getAttribute?.("type") || ""
     );
@@ -924,9 +1018,9 @@ const collectUnresolvedFields = (root = document) => {
 
   const radioGroups = new Map();
 
-  root.querySelectorAll('input[type="radio"]').forEach(radio => {
+  queryAgentElements(root, 'input[type="radio"]').forEach(radio => {
     if (
-      !isElementVisible(radio) ||
+      !isAgentChoiceVisible(radio) ||
       radio.disabled ||
       radio.dataset.fa_filled === "true" ||
       radio.dataset.fa_agent_processed === "true"
@@ -972,11 +1066,10 @@ const collectUnresolvedFields = (root = document) => {
 
   const checkboxGroups = new Map();
 
-  root
-    .querySelectorAll('input[type="checkbox"]')
+  queryAgentElements(root, 'input[type="checkbox"]')
     .forEach(checkbox => {
       if (
-        !isElementVisible(checkbox) ||
+        !isAgentChoiceVisible(checkbox) ||
         checkbox.disabled ||
         checkbox.dataset.fa_filled === "true" ||
         checkbox.dataset.fa_agent_processed === "true"
@@ -1174,10 +1267,16 @@ const fillAgentAnswer = answer => {
   }
 
   if (!filled) {
+    answer.value = "";
+    answer.requiresReview = true;
+    answer.reviewReason =
+      answer.reviewReason ||
+      "The answer could not be applied to this field.";
+
     markAgentState(
       field.elements,
       "unresolved",
-      "The answer could not be applied to this field."
+      answer.reviewReason
     );
 
     return {
@@ -1244,6 +1343,8 @@ window.FastApplyUtils = {
   fillDropdown,
   fillRadio,
   fillCheckbox,
+  getAgentQueryRoots,
+  queryAgentElements,
   collectUnresolvedFields,
   applyAgentAnswers
 };

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
+import { API_URL } from '../../config';
 import { Search, Trash2, Shield, User, Loader2, AlertTriangle } from 'lucide-react';
 
 export default function UserManagement() {
@@ -8,7 +9,6 @@ export default function UserManagement() {
   const [searchTerm, setSearchTerm] = useState('');
   const [error, setError] = useState('');
 
-  const API_URL = import.meta.env.VITE_API_BASE_URL;
 
   useEffect(() => {
     const fetchUsers = async () => {
@@ -23,7 +23,7 @@ export default function UserManagement() {
       }
     };
     fetchUsers();
-  }, [API_URL]);
+  }, []);
 
   const handleDeleteUser = async (id, role) => {
     if (role === 'admin') {

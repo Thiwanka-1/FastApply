@@ -1,16 +1,31 @@
-# React + Vite
+# FastApply Chrome Extension
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+FastApply contains three Vite/React extension pages (dashboard, popup, and side panel), Manifest V3 content scripts, deterministic ATS engines, and a shared manual Agent 2 controller.
 
-Currently, two official plugins are available:
+## Development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+1. Copy the repository `.env.example` values into `backend/.env` and provide real credentials locally.
+2. Start the API:
 
-## React Compiler
+   ```powershell
+   cd backend
+   npm install
+   npm run dev
+   ```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+3. Build the extension:
 
-## Expanding the ESLint configuration
+   ```powershell
+   cd extension
+   npm ci
+   npm run build
+   ```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+4. Open `chrome://extensions`, enable Developer mode, and load `extension/dist` as an unpacked extension.
+5. After changing a content script or `manifest.json`, rebuild, reload FastApply in `chrome://extensions`, and reload every open job page.
+
+The default API is `http://localhost:5000`. A production dashboard build can set `VITE_API_BASE_URL` and `VITE_FRONTEND_URL`. The service worker can also read an `apiBaseUrl` value from `chrome.storage.local`.
+
+## Application workflow
+
+Dedicated ATS engines perform deterministic autofill only. The side panel's **Scan Current Page** action rescans the current URL and live DOM. **Fill Missing with Agent 2** performs another fresh scan, sends exact field types/options to the backend, applies answers without submitting, verifies dropdown selections, and synchronizes the final applied values to the saved application.

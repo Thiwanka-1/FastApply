@@ -3,11 +3,11 @@ console.log("[FastApply] BambooHR Engine Active. (Revised Stable Edition)");
 
 let faBambooIsRunning = false;
 
-// const normalizeText = (text) =>
-//   String(text ?? "")
-//     .replace(/\s+/g, " ")
-//     .trim()
-//     .toLowerCase();
+const normalizeText = (text) =>
+  String(text ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 
 const getVisibleText = (el) =>
   String(
@@ -37,11 +37,6 @@ const isActuallyFilled = (el) => {
   }
 
   return el.dataset.fa_filled === "true";
-};
-
-const containsAny = (text, patterns) => {
-  const t = normalizeText(text);
-  return patterns.some((p) => t.includes(normalizeText(p)));
 };
 
 const getQuestionText = (el) => normalizeText(getVisibleText(el).replace(/\*/g, ""));
@@ -455,6 +450,11 @@ const startEngine = () => {
     }, 700);
   });
 };
+
+window.FastApplyAgent2Controller?.register({
+  atsPlatform: "bamboohr",
+  runDeterministic: attemptAutofill
+});
 
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", startEngine);

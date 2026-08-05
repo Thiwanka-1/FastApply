@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
+import { API_URL } from '../../config';
 import { 
   ShieldAlert, Users, Zap, TrendingUp, Building2, Globe, Loader2, Clock, Filter, Search
 } from 'lucide-react';
@@ -16,7 +17,6 @@ export default function AdminAnalytics() {
   const [searchTerm, setSearchTerm] = useState('');
   const [timeFilter, setTimeFilter] = useState('7D'); // 'TODAY', '7D', '30D', 'ALL'
 
-  const API_URL = import.meta.env.VITE_API_BASE_URL;
 
   useEffect(() => {
     const fetchGlobalData = async () => {
@@ -30,7 +30,7 @@ export default function AdminAnalytics() {
       }
     };
     fetchGlobalData();
-  }, [API_URL]);
+  }, []);
 
   if (loading) {
     return (

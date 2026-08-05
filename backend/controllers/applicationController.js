@@ -20,7 +20,7 @@ const recalculateApplicationStats = application => {
   }).length;
 
   const unresolved = application.answers.filter(answer => {
-    return !hasValue(answer.value) || answer.requiresReview;
+    return !hasValue(answer.value);
   }).length;
 
   application.stats.aiFilled = answered;
@@ -200,6 +200,18 @@ export const updateApplicationAnswers = async (req, res, next) => {
       });
     }
 
+    const syncAppliedAnswers =
+      req.body.syncAppliedAnswers === true;
+
+    const allowedSources = new Set([
+      'profile',
+      'applicationMemory',
+      'documents',
+      'generated',
+      'user',
+      'unknown'
+    ]);
+
     req.body.answers.forEach(update => {
       const fieldId = cleanText(update.fieldId);
 
@@ -215,10 +227,31 @@ export const updateApplicationAnswers = async (req, res, next) => {
         existingAnswer.value = update.value;
       }
 
-      existingAnswer.source = 'user';
-      existingAnswer.confidence = 1;
-      existingAnswer.requiresReview = false;
-      existingAnswer.reviewReason = '';
+      if (syncAppliedAnswers) {
+        existingAnswer.source = allowedSources.has(update.source)
+          ? update.source
+          : existingAnswer.source;
+
+        if (Number.isFinite(Number(update.confidence))) {
+          existingAnswer.confidence = Math.min(
+            1,
+            Math.max(0, Number(update.confidence))
+          );
+        }
+
+        existingAnswer.requiresReview =
+          update.requiresReview === true;
+
+        existingAnswer.reviewReason =
+          existingAnswer.requiresReview
+            ? cleanText(update.reviewReason).slice(0, 2000)
+            : '';
+      } else {
+        existingAnswer.source = 'user';
+        existingAnswer.confidence = 1;
+        existingAnswer.requiresReview = false;
+        existingAnswer.reviewReason = '';
+      }
     });
 
     recalculateApplicationStats(application);

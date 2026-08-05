@@ -30,7 +30,8 @@ const STORAGE_KEYS = [
   'lastPageScan',
   'lastAgent2Result',
   'lastAgent2Summary',
-  'agent2RunState'
+  'agent2RunState',
+  'sidePanelActiveView'
 ];
 
 const hasChromeStorage = () => {
@@ -88,6 +89,80 @@ const getActiveTab = () => {
   });
 };
 
+const getTabFrames = tabId => {
+  return new Promise(resolve => {
+    chrome.webNavigation.getAllFrames(
+      { tabId },
+      frames => {
+        if (chrome.runtime.lastError) {
+          resolve([{ frameId: 0 }]);
+          return;
+        }
+
+        resolve(
+          Array.isArray(frames) && frames.length > 0
+            ? frames
+            : [{ frameId: 0 }]
+        );
+      }
+    );
+  });
+};
+
+const sendToFrame = (tabId, frameId, action) => {
+  return new Promise(resolve => {
+    chrome.tabs.sendMessage(
+      tabId,
+      { action },
+      { frameId },
+      response => {
+        if (chrome.runtime.lastError) {
+          resolve(null);
+          return;
+        }
+
+        resolve(response || null);
+      }
+    );
+  });
+};
+
+const findFastApplyFrame = async tabId => {
+  const frames = await getTabFrames(tabId);
+
+  const candidates = (
+    await Promise.all(
+      frames.map(async frame => {
+        const response = await sendToFrame(
+          tabId,
+          frame.frameId,
+          'FASTAPPLY_GET_PAGE_STATE'
+        );
+
+        if (!response?.success || !response.data?.registered) {
+          return null;
+        }
+
+        const isDedicated =
+          response.data.atsPlatform &&
+          response.data.atsPlatform !== 'generic';
+
+        return {
+          frameId: frame.frameId,
+          response,
+          score:
+            (isDedicated ? 100000 : 0) +
+            Number(response.data.supportedControls || 0) +
+            (frame.frameId === 0 ? 1 : 0)
+        };
+      })
+    )
+  ).filter(Boolean);
+
+  candidates.sort((first, second) => second.score - first.score);
+  return candidates[0] || null;
+};
+
 const sendToActivePage = async action => {
   const tab = await getActiveTab();
 
@@ -98,31 +173,22 @@ const sendToActivePage = async action => {
     };
   }
 
-  return new Promise(resolve => {
-    chrome.tabs.sendMessage(
-      tab.id,
-      { action },
-      { frameId: 0 },
-      response => {
-        if (chrome.runtime.lastError) {
-          resolve({
-            success: false,
-            error:
-              'FastApply is not connected to this page. Reload the job page after reloading the extension.'
-          });
-          return;
-        }
+  const target = await findFastApplyFrame(tab.id);
 
-        resolve(
-          response || {
-            success: false,
-            error:
-              'The job page did not return a response.'
-          }
-        );
-      }
-    );
-  });
+  if (!target) {
+    return {
+      success: false,
+      error:
+        'FastApply is not connected to this page. Reload the job page after reloading the extension.'
+    };
+  }
+
+  return (
+    await sendToFrame(tab.id, target.frameId, action)
+  ) || {
+    success: false,
+    error: 'The job page did not return a response.'
+  };
 };
 
 const hasValue = value => {
@@ -539,20 +605,48 @@ function SidePanel() {
     const stored =
       await readStorage(STORAGE_KEYS);
 
+    const activeTab = await getActiveTab();
+    const activeFrame = activeTab?.id
+      ? await findFastApplyFrame(activeTab.id)
+      : null;
+
+    const currentPageUrl =
+      activeFrame?.response?.data?.pageUrl || '';
+
+    const scanMatchesCurrentPage =
+      !stored.lastPageScan ||
+      (
+        Boolean(currentPageUrl) &&
+        stored.lastPageScan.pageUrl === currentPageUrl
+      );
+
+    setView(
+      stored.sidePanelActiveView === 'profile'
+        ? 'profile'
+        : 'controls'
+    );
+
     setProfile(
       stored.profileData || null
     );
 
     setScan(
-      stored.lastPageScan || null
+      scanMatchesCurrentPage
+        ? stored.lastPageScan || null
+        : null
     );
 
     setAgentResult(
-      stored.lastAgent2Result || null
+      scanMatchesCurrentPage &&
+        stored.lastAgent2Result?.pageUrl === currentPageUrl
+        ? stored.lastAgent2Result
+        : null
     );
 
     setRunState(
-      stored.agent2RunState || null
+      scanMatchesCurrentPage
+        ? stored.agent2RunState || null
+        : null
     );
   };
 
@@ -651,6 +745,14 @@ function SidePanel() {
         setRunState(
           changes.agent2RunState
             .newValue || null
+        );
+      }
+
+      if (changes.sidePanelActiveView) {
+        setView(
+          changes.sidePanelActiveView.newValue === 'profile'
+            ? 'profile'
+            : 'controls'
         );
       }
     };
@@ -889,6 +991,13 @@ function SidePanel() {
                 <h3 className="font-bold text-white">
                   Agent 2 Result
                 </h3>
+
+                {agentResult.persistenceWarning && (
+                  <div className="mt-3 flex gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-5 text-amber-300">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    {agentResult.persistenceWarning}
+                  </div>
+                )}
 
                 <div className="mt-4 grid grid-cols-3 gap-2">
                   <Metric

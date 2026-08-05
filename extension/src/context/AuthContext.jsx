@@ -1,7 +1,15 @@
 import { createContext, useState, useEffect } from 'react';
 import axios from 'axios';
+import { API_URL } from '../config';
 
 export const AuthContext = createContext();
+
+const clearExtensionProfileCache = () => {
+  globalThis.chrome?.storage?.local?.remove?.([
+    'profileData',
+    'profileFetchedAt'
+  ]);
+};
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
@@ -9,8 +17,6 @@ export const AuthProvider = ({ children }) => {
 
   // Configure Axios to always send our HTTP-only cookie
   axios.defaults.withCredentials = true;
-  const API_URL = import.meta.env.VITE_API_BASE_URL;
-
   useEffect(() => {
     // Check if user is already logged in when the extension opens
     const checkUser = async () => {
@@ -19,12 +25,13 @@ export const AuthProvider = ({ children }) => {
         setUser(data);
       } catch (error) {
         setUser(null);
+        clearExtensionProfileCache();
       } finally {
         setLoading(false);
       }
     };
     checkUser();
-  }, [API_URL]);
+  }, []);
 
   const login = async (email, password) => {
     const { data } = await axios.post(`${API_URL}/api/auth/login`, { email, password });
@@ -39,6 +46,7 @@ export const AuthProvider = ({ children }) => {
   const logout = async () => {
     await axios.post(`${API_URL}/api/auth/logout`);
     setUser(null);
+    clearExtensionProfileCache();
   };
   // Update Profile
   const updateProfile = async (userData) => {
@@ -51,6 +59,7 @@ export const AuthProvider = ({ children }) => {
   const deleteProfile = async () => {
     await axios.delete(`${API_URL}/api/auth/profile`);
     setUser(null); // Clear the global state
+    clearExtensionProfileCache();
   };
 
   return (

@@ -380,6 +380,40 @@ const extractJobContext = () => {
   };
 };
 
+const looksLikeJobApplicationPage = () => {
+  const urlText = `${window.location.hostname} ${window.location.pathname}`
+    .toLowerCase();
+
+  if (/\b(job|jobs|career|careers|apply|application)\b/.test(urlText)) {
+    return true;
+  }
+
+  const pageSignals = String(
+    document.querySelector("main, form")?.innerText || ""
+  )
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .slice(0, 12000);
+
+  const hasApplicationLanguage =
+    /apply (for|to) (this|the) (job|position)|job application|submit application/.test(
+      pageSignals
+    );
+
+  const hasCandidateFields = Boolean(
+    document.querySelector(
+      [
+        'input[type="file"][name*="resume" i]',
+        'input[type="file"][id*="resume" i]',
+        'input[name*="linkedin" i]',
+        'input[id*="linkedin" i]'
+      ].join(",")
+    )
+  );
+
+  return hasApplicationLanguage || hasCandidateFields;
+};
+
 const setAgent2RunState = state => {
   chrome.storage.local.set({
     agent2RunState: {
@@ -581,7 +615,7 @@ const runAgent2ForRemainingFields = async () => {
   }
 };
 
-const scheduleAgent2 = () => {
+const _scheduleAgent2 = () => {
   clearTimeout(agent2Timer);
 
   agent2Timer = setTimeout(() => {
@@ -613,6 +647,13 @@ const loadProfile = async () => {
 };
 
 const startGenericEngine = async () => {
+  if (!looksLikeJobApplicationPage()) {
+    console.log(
+      "[FastApply] Generic autofill paused because this does not look like a job application page."
+    );
+    return;
+  }
+
   const profile = await loadProfile();
 
   if (!profile) {

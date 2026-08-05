@@ -21,6 +21,7 @@
       ],
       "js": [
         "utils.js",
+        "agent2-controller.js",
         "lever.js"
       ],
       "run_at": "document_idle",
@@ -46,6 +47,7 @@
       ],
       "js": [
         "utils.js",
+        "agent2-controller.js",
         "ashby.js"
       ],
       "run_at": "document_idle",
@@ -58,6 +60,7 @@
       ],
       "js": [
         "utils.js",
+        "agent2-controller.js",
         "bamboohr.js"
       ],
       "run_at": "document_idle",
@@ -70,6 +73,7 @@
       ],
       "js": [
         "utils.js",
+        "agent2-controller.js",
         "rippling.js"
       ],
       "run_at": "document_idle",
@@ -81,6 +85,7 @@
       ],
       "js": [
         "utils.js",
+        "agent2-controller.js",
         "workday-orchestrator.js",
         "workday-personal.js",
         "workday-experience.js",
@@ -128,6 +133,7 @@
       ],
       "js": [
         "utils.js",
+        "agent2-controller.js",
         "smartrecruiters-engine.js"
       ],
       "run_at": "document_idle",
@@ -140,6 +146,7 @@
       ],
       "js": [
         "utils.js",
+        "agent2-controller.js",
         "eightfold-engine.js"
       ],
       "run_at": "document_idle",
@@ -151,6 +158,7 @@
       ],
       "js": [
         "utils.js",
+        "agent2-controller.js",
         "icims-engine.js"
       ],
       "run_at": "document_idle",
@@ -161,6 +169,7 @@
     "storage",
     "activeTab",
     "tabs",
+    "webNavigation",
     "sidePanel",
     "clipboardWrite",
     "scripting"

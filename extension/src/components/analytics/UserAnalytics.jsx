@@ -1,5 +1,6 @@
 import { useState, useEffect, useContext } from 'react';
 import axios from 'axios';
+import { API_URL } from '../../config';
 import { AuthContext } from '../../context/AuthContext';
 import { 
   Activity, Briefcase, Calendar, CheckCircle2, Search, Trash2, 
@@ -20,7 +21,6 @@ export default function UserAnalytics() {
   const [searchTerm, setSearchTerm] = useState('');
   const [timeFilter, setTimeFilter] = useState('7D'); // 'TODAY', '7D', '30D', 'ALL'
 
-  const API_URL = import.meta.env.VITE_API_BASE_URL;
 
   // Fetch BOTH Profile Completeness AND Autofill History
   useEffect(() => {
@@ -40,7 +40,7 @@ export default function UserAnalytics() {
       }
     };
     fetchAllData();
-  }, [API_URL]);
+  }, []);
 
   const handleDeleteLog = async (id) => {
     if (!window.confirm("Remove this application log?")) return;

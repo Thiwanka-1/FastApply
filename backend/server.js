@@ -18,13 +18,37 @@ connectDB();
 
 const app = express();
 
+const allowedOrigins = [
+  process.env.CLIENT_URL,
+  ...(process.env.CLIENT_URLS || '').split(','),
+  process.env.CHROME_EXTENSION_ORIGIN
+]
+  .map(value => String(value || '').trim().replace(/\/$/, ''))
+  .filter(Boolean);
+
 // --- Production-Ready Middleware ---
 
 // 1. CORS Configuration: Crucial for allowing the frontend to send cookies
 app.use(cors({
-  origin: process.env.CLIENT_URL,
+  origin: (origin, callback) => {
+    const normalizedOrigin = String(origin || '').replace(/\/$/, '');
+    const isDevelopmentExtension =
+      process.env.NODE_ENV !== 'production' &&
+      normalizedOrigin.startsWith('chrome-extension://');
+
+    if (
+      !origin ||
+      allowedOrigins.includes(normalizedOrigin) ||
+      isDevelopmentExtension
+    ) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error('Origin is not allowed by FastApply CORS policy.'));
+  },
   credentials: true, // This MUST be true to accept cookies from the client
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 }));
 
 // 2. Body Parsers: Allows Express to read JSON data sent in the request body

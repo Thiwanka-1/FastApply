@@ -20,8 +20,7 @@ import EducationHistory from '../components/profile/EducationHistory';
 import WebsitesSkills from '../components/profile/WebsitesSkills';
 import EEOInfo from '../components/profile/EEOInfo';
 import ResumeUpload from '../components/profile/ResumeUpload';
-
-const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+import { API_URL } from '../config';
 
 const normalizeProfile = profile => ({
   ...profile,
@@ -66,7 +65,6 @@ const normalizeProfile = profile => ({
         company: '',
         location: '',
         employmentType: '',
-        currentlyWorkHere: false,
         startDate: '',
         endDate: '',
         description: '',
@@ -91,7 +89,6 @@ const normalizeProfile = profile => ({
     : [],
 
   eeo: {
-    optOut: false,
     authorizedToWork: '',
     requireVisaNow: '',
     requireVisaFuture: '',

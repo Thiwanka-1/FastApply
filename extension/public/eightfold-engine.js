@@ -148,7 +148,10 @@ window.EightfoldEngine.runAutofill = async (profile) => {
         window.EightfoldEngine.fillSelectDropdown("Country", c.country);
 
         // 3. EEO & Work Eligibility Radio Groups
-        window.EightfoldEngine.fillRadioGroup("Are you currently eligible to work within the United States?", e.legallyAuthorized ? "Yes" : "No");
+        window.EightfoldEngine.fillRadioGroup(
+            "Are you currently eligible to work within the United States?",
+            e.authorizedToWork
+        );
         window.EightfoldEngine.fillRadioGroup("Gender", e.gender);
         window.EightfoldEngine.fillRadioGroup("What is your race/ethnicity?", e.race);
         
@@ -157,8 +160,9 @@ window.EightfoldEngine.runAutofill = async (profile) => {
         window.EightfoldEngine.fillRadioGroup("Please check one of the boxes:-", e.veteran);
 
         // 4. Visa Sponsorship Textarea
-        if (e.requireSponsorship !== undefined) {
-            const sponsorshipText = e.requireSponsorship ? "Yes, I will require sponsorship." : "No, I do not require sponsorship.";
+        if (e.requireVisaFuture) {
+            const requiresSponsorship = String(e.requireVisaFuture).toLowerCase().startsWith("yes");
+            const sponsorshipText = requiresSponsorship ? "Yes, I will require sponsorship." : "No, I do not require sponsorship.";
             window.EightfoldEngine.setNativeValue(window.EightfoldEngine.findInputByLabelText("Will you now, or in the future, require visa sponsorship? If so, please explain."), sponsorshipText);
         }
 
@@ -177,6 +181,13 @@ const startEightfoldEngine = () => {
         }, 1500); 
     });
 };
+
+window.FastApplyAgent2Controller?.register({
+    atsPlatform: "eightfold",
+    runDeterministic: profile => {
+        return window.EightfoldEngine.runAutofill(profile);
+    }
+});
 
 if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", startEightfoldEngine);

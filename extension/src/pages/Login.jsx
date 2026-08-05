@@ -1,6 +1,6 @@
 import { useState, useContext } from 'react';
 import { AuthContext } from '../context/AuthContext';
-import { useNavigate, Link, Navigate } from 'react-router-dom';
+import { Link, Navigate } from 'react-router-dom';
 import { Briefcase, Zap, ShieldCheck, Eye, EyeOff } from 'lucide-react';
 
 const Login = () => {
@@ -10,8 +10,6 @@ const Login = () => {
   const [error, setError] = useState('');
   
   const { user, login } = useContext(AuthContext);
-  const navigate = useNavigate();
-
   // DYNAMIC REDIRECT: Routes admins to /admin and normal users to /
   if (user) {
     return <Navigate to={user.role === 'admin' ? '/admin' : '/'} replace />;
