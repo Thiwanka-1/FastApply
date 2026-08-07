@@ -1,87 +1,90 @@
 // public/workday-experience-work.js
 window.WorkdayEngine = window.WorkdayEngine || {};
 
-// Exact working Date logic
-window.WorkdayEngine.fillWorkdayDate = (container, rawDate) => {
-  if (!container || !rawDate) return;
-  const monthInput = container.querySelector('input[data-automation-id="dateSectionMonth-input"]');
-  const yearInput = container.querySelector('input[data-automation-id="dateSectionYear-input"]');
-  if (!monthInput || !yearInput) return;
+(() => {
+  const W = window.WorkdayEngine;
 
-  const formatted = window.WorkdayEngine.formatMonthYear(rawDate); 
-  const parts = formatted.split("/");
-  if (parts.length !== 2) return;
-  const [mm, yyyy] = parts;
+  W.fillWorkdayDate = (container, rawDate) => {
+    if (!container || !rawDate) return false;
+    const formatted = W.formatMonthYear(rawDate);
+    const [month, year] = formatted.split("/");
+    if (!month || !year) return false;
 
-  if (monthInput.dataset.fa_filled !== "true") {
-    window.FastApplyUtils.fillField(monthInput, mm);
-    monthInput.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
-    monthInput.dataset.fa_filled = "true";
-  }
-  if (yearInput.dataset.fa_filled !== "true") {
-    window.FastApplyUtils.fillField(yearInput, yyyy);
-    yearInput.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
-    yearInput.dataset.fa_filled = "true";
-  }
-};
+    const monthInput = container.querySelector(
+      'input[data-automation-id="dateSectionMonth-input"], input[name*="month" i]'
+    );
+    const yearInput = container.querySelector(
+      'input[data-automation-id="dateSectionYear-input"], input[name*="year" i]'
+    );
+    if (!monthInput || !yearInput) return false;
 
-window.WorkdayEngine.expandWorkIfNeeded = async (workArr) => {
-  const uiWorkCount = Array.from(document.querySelectorAll("label")).filter(l => l.innerText.toLowerCase().includes("job title")).length;
-  if (workArr.length > uiWorkCount) {
-    const btns = Array.from(document.querySelectorAll("button")).filter(b => b.innerText.trim().toLowerCase() === "add another");
-    for (const btn of btns) {
-      const section = btn.closest("section, div[data-automation-id], .css-1qj0f45") || btn.parentElement.parentElement.parentElement.parentElement;
-      if (section && section.innerText.toLowerCase().includes("work experience") && btn.dataset.fa_expanded !== "true") {
-        btn.dataset.fa_expanded = "true";
-        btn.click();
-        await window.WorkdayEngine.wait(1500); 
-        return true; // Clicked
+    const monthFilled = W.fillTextField(monthInput, month);
+    const yearFilled = W.fillTextField(yearInput, year);
+    return monthFilled && yearFilled;
+  };
+
+  const setCheckbox = (checkbox, checked) => {
+    if (!checkbox || checkbox.disabled) return false;
+    if (checkbox.checked !== checked) checkbox.click();
+    if (checkbox.checked !== checked) return false;
+    checkbox.dataset.fa_filled = "true";
+    return true;
+  };
+
+  const getTextControl = container => container?.querySelector(
+    "input:not([type='hidden']):not([type='checkbox']):not([type='radio']), textarea"
+  );
+
+  W.handleWork = async workHistory => {
+    if (!Array.isArray(workHistory) || workHistory.length === 0) return false;
+    const section = W.findSection("work experience");
+    if (!section) return false;
+
+    await W.ensureSectionEntries({
+      section,
+      expectedCount: workHistory.length,
+      anchorPattern: /^job title$/
+    });
+
+    let workIndex = -1;
+    const labels = W.querySection(section, "label");
+
+    for (const label of labels) {
+      const question = W.normalizeText(W.getElementText(label));
+      if (question === "job title") workIndex += 1;
+      const work = workHistory[workIndex];
+      if (!work) continue;
+
+      const container = W.getFieldContainer(label);
+      if (!container) continue;
+      const input = getTextControl(container);
+
+      if (question === "job title") W.fillTextField(input, work.jobTitle);
+      else if (question === "company" || question.includes("company name")) {
+        W.fillTextField(input, work.company);
+      } else if (question === "location" || question === "job location") {
+        W.fillTextField(input, work.location);
+      } else if (
+        question.includes("role description") ||
+        question === "description" ||
+        question.includes("responsibilities")
+      ) {
+        W.fillTextField(input, work.description);
+      } else if (
+        question.includes("currently work") ||
+        question.includes("current position")
+      ) {
+        setCheckbox(
+          container.querySelector('input[type="checkbox"]'),
+          work.currentlyWorkHere === true
+        );
+      } else if (/^(from|start date|start)$/.test(question)) {
+        W.fillWorkdayDate(container, work.startDate);
+      } else if (/^(to|end date|end)$/.test(question)) {
+        if (!work.currentlyWorkHere) W.fillWorkdayDate(container, work.endDate);
       }
     }
-  }
-  return false;
-};
 
-window.WorkdayEngine.handleWork = async (workArr) => {
-  if (!workArr || workArr.length === 0) return false;
-
-  const isExpanding = await window.WorkdayEngine.expandWorkIfNeeded(workArr);
-  if (isExpanding) return true; 
-
-  let workIndex = -1;
-  const labels = document.querySelectorAll("label");
-
-  labels.forEach((label) => {
-    const questionText = label.innerText.toLowerCase().replace(/\*/g, "").trim();
-    if (!questionText) return;
-
-    if (questionText === "job title") workIndex++;
-    const currentWork = workArr[workIndex];
-    if (!currentWork) return;
-
-    let container = label.parentElement;
-    for (let i = 0; i < 4; i++) {
-      if (container && container.querySelector("input:not([type='hidden']), select, textarea, [data-automation-id='selectWidget']")) break;
-      if (container && container.parentElement) container = container.parentElement;
-    }
-    if (!container) return;
-
-    let textInput = container.querySelector("input:not([type='hidden']):not([type='checkbox']):not([type='radio']), textarea");
-
-    // Exact working mapping
-    if (questionText === "job title") { if (textInput && textInput.dataset.fa_filled !== "true") window.FastApplyUtils.fillField(textInput, currentWork.jobTitle); }
-    else if (questionText === "company" || questionText.includes("company name")) { if (textInput && textInput.dataset.fa_filled !== "true") window.FastApplyUtils.fillField(textInput, currentWork.company); }
-    else if (questionText === "location") { if (textInput && textInput.dataset.fa_filled !== "true") window.FastApplyUtils.fillField(textInput, currentWork.location); }
-    else if (questionText.includes("role description") || questionText.includes("description")) { if (textInput && textInput.dataset.fa_filled !== "true") window.FastApplyUtils.fillField(textInput, currentWork.description); }
-    else if (questionText === "from" || questionText === "start date" || questionText.includes("from")) {
-      if (currentWork.startDate) window.WorkdayEngine.fillWorkdayDate(container, currentWork.startDate);
-    }
-    else if (questionText === "to" || questionText === "end date" || questionText.includes("to")) {
-      if (currentWork.endDate && !currentWork.currentlyWorkHere) {
-        window.WorkdayEngine.fillWorkdayDate(container, currentWork.endDate);
-      }
-    }
-  });
-
-  return false;
-};
+    return W.getSectionEntryCount(section, /^job title$/) >= workHistory.length;
+  };
+})();

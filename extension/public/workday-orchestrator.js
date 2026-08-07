@@ -3,231 +3,501 @@ console.log("[FastApply] Workday Orchestrator Active.");
 
 window.WorkdayEngine = window.WorkdayEngine || {};
 
-// --- SHARED UTILS ---
-window.WorkdayEngine.wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+(() => {
+  const W = window.WorkdayEngine;
+  const U = window.FastApplyUtils;
 
-window.WorkdayEngine.getTodayDate = () => {
-  const today = new Date();
-  const mm = String(today.getMonth() + 1).padStart(2, "0");
-  const dd = String(today.getDate()).padStart(2, "0");
-  const yyyy = today.getFullYear();
-  return `${mm}/${dd}/${yyyy}`;
-};
-
-window.WorkdayEngine.formatMonthYear = (value) => {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  if (/^\d{2}\/\d{4}$/.test(raw)) return raw;
-  if (/^\d{1}\/\d{4}$/.test(raw)) {
-    const [m, y] = raw.split("/");
-    return `${m.padStart(2, "0")}/${y}`;
-  }
-  if (/^\d{4}-\d{2}/.test(raw)) {
-    const [y, m] = raw.split("-");
-    return `${m}/${y}`;
-  }
-  const months = { jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06", jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12" };
-  const parts = raw.replace(/,/g, " ").split(/\s+/).filter(Boolean);
-  if (parts.length >= 2) {
-    const month = months[parts[0].toLowerCase().slice(0, 3)];
-    const year = parts.find((p) => /^\d{4}$/.test(p));
-    if (month && year) return `${month}/${year}`;
-  }
-  return raw;
-};
-
-window.WorkdayEngine.isVisible = (el) => {
-  if (!el) return false;
-  const style = window.getComputedStyle(el);
-  const rect = el.getBoundingClientRect();
-  return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
-};
-
-window.WorkdayEngine.workdaySmartMatch = (optText, targetValue) => {
-  const o = String(optText || "").toLowerCase().trim();
-  const t = String(targetValue || "").toLowerCase().trim();
-  if (!o || !t) return false;
-
-  if ((t.includes("decline") || t.includes("prefer not")) && (o.includes("decline") || o.includes("prefer not") || o.includes("not wish") || o.includes("choose not"))) return true;
-
-  const isTargetMale = t === "male" || t === "man";
-  const isTargetFemale = t === "female" || t === "woman";
-  const isOptMale = /\b(male|man)\b/i.test(o) && !/\b(female|woman)\b/i.test(o);
-  const isOptFemale = /\b(female|woman)\b/i.test(o);
-
-  if (isTargetMale && isOptMale) return true;
-  if (isTargetFemale && isOptFemale) return true;
-
-  if (!isTargetMale && !isTargetFemale) {
-    if (o === t) return true;
-    if (o.includes(t) || t.includes(o)) return true;
-    const tTokens = t.split(/[\s,()/:-]+/).filter(Boolean);
-    const oTokens = o.split(/[\s,()/:-]+/).filter(Boolean);
-    for (let token of tTokens) {
-      if (token.length > 3 && oTokens.includes(token)) return true;
-    }
-  }
-
-  if (t.includes("veteran") && o.includes("veteran")) {
-    const targetIsNo = t.includes("not") || t.includes("no");
-    const optIsNo = o.includes("not") || o.includes("no");
-    if (targetIsNo && optIsNo) return true;
-    if (!targetIsNo && !optIsNo) return true;
-  }
-
-  if (t.startsWith("yes") && o.startsWith("yes")) return true;
-  if (t.startsWith("no") && o.startsWith("no")) return true;
-  if (t.includes("asian") && o.includes("asian")) return true;
-  if (t.includes("black") && (o.includes("black") || o.includes("african"))) return true;
-  if ((t.includes("hispanic") || t.includes("latino") || t.includes("latinx")) && (o.includes("latinx") || o.includes("hispanic") || o.includes("latino"))) return true;
-  if (t.includes("white") && o.includes("white")) return true;
-  if (t.includes("agree") && o.includes("agree") && !o.includes("do not")) return true;
-
-  return false;
-};
-
-window.WorkdayEngine.fillWorkdayDropdown = (container, targetValue) => {
-  if (!container || !targetValue || container.dataset.fa_dropdown_processing === "true" || container.dataset.fa_filled === "true") return false;
-  const trigger = container.querySelector('[data-automation-id="selectWidget"], button, [role="combobox"], [role="listbox"]');
-  if (!trigger) return false;
-
-  container.dataset.fa_dropdown_processing = "true";
-  try {
-    trigger.focus();
-    trigger.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-    trigger.click();
-  } catch (e) {
-    container.dataset.fa_dropdown_processing = "false";
-    return false;
-  }
-
-  setTimeout(() => {
-    let matchedOption = null;
-    const options = Array.from(document.querySelectorAll('[data-automation-id="promptOption"], [role="option"], li')).filter(window.WorkdayEngine.isVisible);
-
-    for (let i = 0; i < options.length; i++) {
-      if (window.WorkdayEngine.workdaySmartMatch(options[i].innerText, targetValue)) {
-        matchedOption = options[i];
-        break;
-      }
-    }
-
-    if (!matchedOption) {
-      const searchInput = document.querySelector('[data-automation-id="searchBox"]');
-      if (searchInput) {
-        window.FastApplyUtils.fillField(searchInput, targetValue);
-        setTimeout(() => {
-          const newOptions = Array.from(document.querySelectorAll('[data-automation-id="promptOption"], [role="option"], li')).filter(window.WorkdayEngine.isVisible);
-          for (let i = 0; i < newOptions.length; i++) {
-            if (window.WorkdayEngine.workdaySmartMatch(newOptions[i].innerText, targetValue)) {
-              matchedOption = newOptions[i];
-              break;
-            }
-          }
-          if (matchedOption) {
-            matchedOption.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-            matchedOption.click();
-            container.dataset.fa_filled = "true";
-            trigger.style.border = "2px solid #8b5cf6";
-          } else {
-            searchInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 13 }));
-          }
-          container.dataset.fa_dropdown_processing = "false";
-        }, 500);
-        return;
-      }
-    }
-
-    if (matchedOption) {
-      matchedOption.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-      matchedOption.click();
-      container.dataset.fa_filled = "true";
-      trigger.style.border = "2px solid #8b5cf6";
-    } else {
-      document.body.click();
-    }
-    container.dataset.fa_dropdown_processing = "false";
-  }, 500);
-  return true;
-};
-
-// --- ROUTER FIX: ONLY READ LABELS AND HEADINGS ---
-const getCurrentPage = () => {
-  // Grab text ONLY from labels and headings. This ignores the progress tracker at the top!
-  const labelsText = Array.from(document.querySelectorAll('label')).map(l => l.innerText.toLowerCase()).join(" ");
-  const headingsText = Array.from(document.querySelectorAll('h2, h3, h4, h5')).map(h => h.innerText.toLowerCase()).join(" ");
-
-  // 1. EEO / Voluntary Disclosures
-  if (headingsText.includes("voluntary disclosures") || headingsText.includes("self identify") || labelsText.includes("gender") || labelsText.includes("veteran") || labelsText.includes("ethnicity")) {
-    return "EEO_DISCLOSURES";
-  }
-
-  // 2. Experience & Education
-  // FIX: Look for "Add Another" buttons too!
-  const hasAddButtons = Array.from(document.querySelectorAll('button')).some(b => {
-      const text = b.innerText.trim().toLowerCase();
-      return text === "add" || text === "add another";
+  W.wait = milliseconds => new Promise(resolve => {
+    window.setTimeout(resolve, milliseconds);
   });
-  
-  if (headingsText.includes("work experience") || headingsText.includes("education") || labelsText.includes("type to add skills") || hasAddButtons) {
-    return "EXPERIENCE_EDUCATION";
-  }
 
-  // 3. Personal Information
-  if (labelsText.includes("given name") || labelsText.includes("address line 1") || document.querySelector('input[type="email"]')) {
-    return "PERSONAL_INFO";
-  }
+  W.waitFor = async (predicate, options = {}) => {
+    const timeout = Number(options.timeout) || 5000;
+    const interval = Number(options.interval) || 120;
+    const startedAt = Date.now();
 
-  return "UNKNOWN";
-};
+    while (Date.now() - startedAt < timeout) {
+      try {
+        const result = predicate();
+        if (result) return result;
+      } catch (_) {}
 
-const runWorkdayDeterministic = profile => {
-  const currentPage = getCurrentPage();
+      await W.wait(interval);
+    }
 
-  switch (currentPage) {
-    case "PERSONAL_INFO":
-      return window.WorkdayEngine.handlePersonalInfo?.(profile);
-    case "EXPERIENCE_EDUCATION":
-      return window.WorkdayEngine.handleExperience?.(profile);
-    case "EEO_DISCLOSURES":
-      return window.WorkdayEngine.handleEEO?.(profile);
-    default:
+    return null;
+  };
+
+  W.normalizeText = value => String(value ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/[’']/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .toLowerCase()
+    .trim();
+
+  W.getElementText = element => String(
+    element?.innerText ||
+    element?.textContent ||
+    element?.getAttribute?.("aria-label") ||
+    element?.getAttribute?.("title") ||
+    ""
+  ).replace(/\s+/g, " ").trim();
+
+  W.getTodayDate = () => {
+    const today = new Date();
+    const month = String(today.getMonth() + 1).padStart(2, "0");
+    const day = String(today.getDate()).padStart(2, "0");
+    return `${month}/${day}/${today.getFullYear()}`;
+  };
+
+  W.formatMonthYear = value => {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+
+    let match = raw.match(/^(\d{4})[-/](\d{1,2})(?:[-/]\d{1,2})?/);
+    if (match) return `${String(match[2]).padStart(2, "0")}/${match[1]}`;
+
+    match = raw.match(/^(\d{1,2})[-/](\d{4})$/);
+    if (match) return `${String(match[1]).padStart(2, "0")}/${match[2]}`;
+
+    match = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+    if (match) {
+      const first = Number(match[1]);
+      const second = Number(match[2]);
+      const month = first > 12 ? second : first;
+      if (month >= 1 && month <= 12) {
+        return `${String(month).padStart(2, "0")}/${match[3]}`;
+      }
+    }
+
+    match = raw.match(/^(\d{4})$/);
+    if (match) return `01/${match[1]}`;
+
+    const months = {
+      jan: "01", feb: "02", mar: "03", apr: "04",
+      may: "05", jun: "06", jul: "07", aug: "08",
+      sep: "09", oct: "10", nov: "11", dec: "12"
+    };
+    const parts = raw.replace(/,/g, " ").split(/\s+/).filter(Boolean);
+    const month = months[String(parts[0] || "").toLowerCase().slice(0, 3)];
+    const year = parts.find(part => /^\d{4}$/.test(part));
+    return month && year ? `${month}/${year}` : "";
+  };
+
+  W.isVisible = element => {
+    if (!element?.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    const rectangle = element.getBoundingClientRect();
+    return style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      Number(style.opacity) !== 0 &&
+      rectangle.width > 0 &&
+      rectangle.height > 0;
+  };
+
+  W.setInputValue = (element, value) => {
+    if (!element || element.disabled || element.readOnly) return false;
+    const normalized = String(value ?? "");
+
+    try {
+      const prototype = element.tagName === "TEXTAREA"
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+      element.focus();
+      if (setter) setter.call(element, normalized);
+      else element.value = normalized;
+      element.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        data: normalized,
+        inputType: "insertText"
+      }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    } catch (_) {
       return false;
-  }
-};
+    }
+  };
 
-// --- MAIN LOOP ---
-const startEngine = () => {
-  chrome.storage.local.get(["autofillEnabled", "profileData"], (res) => {
-    if (res.autofillEnabled === false || !res.profileData) return;
+  W.fillTextField = (element, value) => {
+    const target = String(value ?? "").trim();
+    if (!element || !target || element.disabled || element.readOnly) return false;
 
-    setInterval(() => {
-      // 1. Are there unfilled text inputs?
-      const needsFilling = document.querySelectorAll(
-        'input:not([data-fa_filled="true"]):not([type="hidden"]), textarea:not([data-fa_filled="true"])'
-      ).length > 0;
-      
-      // 2. Are there unclicked "Add" OR "Add Another" buttons for our sections?
-      const needsExpanding = Array.from(document.querySelectorAll('button')).some(b => {
-          const text = b.innerText.trim().toLowerCase();
-          return (text === "add" || text === "add another") && b.dataset.fa_expanded !== "true";
-      });
+    if (W.normalizeText(element.value) !== W.normalizeText(target)) {
+      if (!W.setInputValue(element, target)) return false;
+      element.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    }
 
-      // If either is true, run the page logic!
-      if (needsFilling || needsExpanding) {
-        runWorkdayDeterministic(res.profileData);
+    if (W.normalizeText(element.value) !== W.normalizeText(target)) return false;
+    element.dataset.fa_filled = "true";
+    element.dataset.fa_fill_type = "field";
+    return true;
+  };
+
+  W.clickElement = element => {
+    if (!element || !W.isVisible(element) || element.disabled) return false;
+
+    try {
+      element.dispatchEvent(new MouseEvent("mousedown", {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      }));
+      element.dispatchEvent(new MouseEvent("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      }));
+      element.click();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  W.getFieldContainer = label => {
+    if (!label) return null;
+    const labelFor = label.getAttribute("for");
+    const linkedControl = labelFor
+      ? (label.getRootNode()?.getElementById?.(labelFor) || document.getElementById(labelFor))
+      : null;
+
+    const selector = [
+      "input:not([type='hidden'])",
+      "select",
+      "textarea",
+      '[data-automation-id="selectWidget"]',
+      '[role="combobox"]'
+    ].join(",");
+
+    if (linkedControl) {
+      let current = linkedControl.parentElement;
+      for (let depth = 0; current && depth < 5; depth += 1) {
+        if (current.contains(label) || current.querySelector("label")) return current;
+        current = current.parentElement;
       }
-    }, 1500);
+      return linkedControl.parentElement;
+    }
+
+    let current = label.parentElement;
+    for (let depth = 0; current && depth < 7; depth += 1) {
+      if (current.querySelector(selector)) return current;
+      current = current.parentElement;
+    }
+    return null;
+  };
+
+  const sectionHeadingPattern = /^(work experience|education|skills|websites|certifications?|languages?|resume|documents?|voluntary disclosures?|application questions?)\b/i;
+
+  W.findSection = keywords => {
+    const wanted = (Array.isArray(keywords) ? keywords : [keywords])
+      .map(W.normalizeText)
+      .filter(Boolean);
+    const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5"))
+      .filter(W.isVisible);
+    const heading = headings.find(element => {
+      const text = W.normalizeText(W.getElementText(element));
+      return wanted.some(keyword => text === keyword || text.startsWith(`${keyword} `));
+    });
+    if (!heading) return null;
+
+    const headingIndex = headings.indexOf(heading);
+    const headingLevel = Number(heading.tagName.slice(1)) || 6;
+    const currentKeyword = wanted.find(keyword => {
+      const text = W.normalizeText(W.getElementText(heading));
+      return text === keyword || text.startsWith(`${keyword} `);
+    });
+    const boundary = headings.slice(headingIndex + 1).find(element => {
+      const elementLevel = Number(element.tagName.slice(1)) || 6;
+      const elementText = W.normalizeText(W.getElementText(element));
+      return elementLevel <= headingLevel &&
+        (!currentKeyword || !elementText.startsWith(currentKeyword)) &&
+        sectionHeadingPattern.test(W.getElementText(element).trim());
+    }) || null;
+
+    return { heading, boundary };
+  };
+
+  W.isInSection = (element, section) => {
+    if (!element || !section?.heading) return false;
+    const followsHeading = Boolean(
+      section.heading.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING
+    );
+    if (!followsHeading) return false;
+    if (!section.boundary) return true;
+    return Boolean(
+      element.compareDocumentPosition(section.boundary) & Node.DOCUMENT_POSITION_FOLLOWING
+    );
+  };
+
+  W.querySection = (section, selector) => {
+    if (!section) return [];
+    return Array.from(document.querySelectorAll(selector))
+      .filter(element => W.isInSection(element, section));
+  };
+
+  const getControlledPopup = control => {
+    const ids = [
+      control?.getAttribute?.("aria-controls"),
+      control?.getAttribute?.("aria-owns")
+    ].filter(Boolean);
+
+    for (const id of ids) {
+      const popup = document.getElementById(id);
+      if (popup) return popup;
+    }
+    return null;
+  };
+
+  W.getWorkdayOptions = control => {
+    const popup = getControlledPopup(control);
+    const root = popup || document;
+    return Array.from(root.querySelectorAll(
+      '[data-automation-id="promptOption"], [role="option"]'
+    )).filter(W.isVisible);
+  };
+
+  W.findBestOption = (options, targetValue) => {
+    const target = W.normalizeText(targetValue);
+    if (!target) return null;
+    const usable = options.filter(option => W.normalizeText(W.getElementText(option)));
+    const exact = usable.find(option => W.normalizeText(W.getElementText(option)) === target);
+    if (exact) return exact;
+
+    const wholeValueMatches = usable.filter(option => {
+      const optionText = W.normalizeText(W.getElementText(option));
+      return optionText.startsWith(`${target} `) || optionText.endsWith(` ${target}`);
+    });
+    if (wholeValueMatches.length === 1) return wholeValueMatches[0];
+
+    const smartMatches = usable.filter(option => {
+      return U?.smartMatch?.(W.getElementText(option), targetValue) === true;
+    });
+    return smartMatches.length === 1 ? smartMatches[0] : null;
+  };
+
+  W.readDropdownValue = (container, trigger) => {
+    const selected = Array.from(container?.querySelectorAll?.(
+      '[data-automation-id="selectedItem"], [aria-selected="true"], [data-testid*="selected"]'
+    ) || [])
+      .map(W.getElementText)
+      .filter(Boolean)
+      .join(", ");
+    if (selected) return selected;
+    if (trigger?.tagName === "INPUT") return String(trigger.value || "").trim();
+    return W.getElementText(trigger)
+      .replace(/^(select|choose)\s*/i, "")
+      .trim();
+  };
+
+  W.closeDropdown = control => {
+    control?.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Escape",
+      code: "Escape",
+      bubbles: true
+    }));
+  };
+
+  W.fillWorkdayDropdown = async (container, targetValue) => {
+    const target = String(targetValue ?? "").trim();
+    if (!container || !target || container.dataset.fa_dropdown_processing === "true") {
+      return false;
+    }
+
+    const trigger = container.querySelector([
+      '[data-automation-id="selectWidget"]',
+      '[role="combobox"][aria-haspopup="listbox"]',
+      'input[role="combobox"]',
+      '[aria-haspopup="listbox"]'
+    ].join(","));
+    if (!trigger || trigger.disabled) return false;
+
+    const currentValue = W.readDropdownValue(container, trigger);
+    if (currentValue && U?.smartMatch?.(currentValue, target)) {
+      trigger.dataset.fa_filled = "true";
+      container.dataset.fa_filled = "true";
+      return true;
+    }
+
+    container.dataset.fa_dropdown_processing = "true";
+
+    try {
+      if (!W.clickElement(trigger)) return false;
+
+      let options = await W.waitFor(() => {
+        const found = W.getWorkdayOptions(trigger);
+        return found.length ? found : null;
+      }, { timeout: 4500 });
+
+      let match = W.findBestOption(options || [], target);
+
+      if (!match) {
+        const popup = getControlledPopup(trigger);
+        const searchInputs = Array.from((popup || document).querySelectorAll(
+          'input[data-automation-id="searchBox"], input[role="combobox"]'
+        )).filter(input => {
+          return W.isVisible(input) &&
+            input !== trigger &&
+            !input.closest('[data-automation-id="formField-skills"]');
+        });
+        const searchInput = searchInputs[searchInputs.length - 1];
+
+        if (searchInput) {
+          W.setInputValue(searchInput, target);
+          match = await W.waitFor(() => {
+            options = W.getWorkdayOptions(trigger);
+            return W.findBestOption(options, target);
+          }, { timeout: 6000, interval: 180 });
+        }
+      }
+
+      if (!match) {
+        W.closeDropdown(trigger);
+        return false;
+      }
+
+      if (!W.clickElement(match)) return false;
+      await W.wait(350);
+
+      const selectedValue = W.readDropdownValue(container, trigger);
+      const confirmed = Boolean(
+        (selectedValue && U?.smartMatch?.(selectedValue, target)) ||
+        !match.isConnected ||
+        !W.isVisible(match)
+      );
+
+      if (!confirmed) return false;
+      trigger.dataset.fa_filled = "true";
+      trigger.dataset.fa_fill_type = "dropdown";
+      container.dataset.fa_filled = "true";
+      return true;
+    } finally {
+      delete container.dataset.fa_dropdown_processing;
+    }
+  };
+
+  W.workdaySmartMatch = (optionText, targetValue) => {
+    return U?.smartMatch?.(optionText, targetValue) === true;
+  };
+
+  const getCurrentPage = () => {
+    const labelText = Array.from(document.querySelectorAll("label"))
+      .filter(W.isVisible)
+      .map(W.getElementText)
+      .join(" ")
+      .toLowerCase();
+    const headingText = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5"))
+      .filter(W.isVisible)
+      .map(W.getElementText)
+      .join(" ")
+      .toLowerCase();
+
+    if (
+      headingText.includes("work experience") ||
+      headingText.includes("education") ||
+      labelText.includes("type to add skills")
+    ) {
+      return "EXPERIENCE_EDUCATION";
+    }
+
+    if (
+      labelText.includes("given name") ||
+      labelText.includes("family name") ||
+      labelText.includes("address line 1") ||
+      document.querySelector('input[data-automation-id="legalNameSection_firstName"]')
+    ) {
+      return "PERSONAL_INFO";
+    }
+
+    if (
+      headingText.includes("voluntary disclosure") ||
+      headingText.includes("self identify") ||
+      labelText.includes("gender") ||
+      labelText.includes("veteran") ||
+      labelText.includes("ethnicity") ||
+      document.querySelector('[role="combobox"], input[type="radio"], input[type="checkbox"]')
+    ) {
+      return "APPLICATION_QUESTIONS";
+    }
+
+    return "UNKNOWN";
+  };
+
+  W.getCurrentPage = getCurrentPage;
+
+  const runWorkdayDeterministic = async profile => {
+    if (!profile) return false;
+    W.lastProfile = profile;
+
+    const execute = async () => {
+      switch (getCurrentPage()) {
+        case "PERSONAL_INFO":
+          return W.handlePersonalInfo?.(profile);
+        case "EXPERIENCE_EDUCATION":
+          return W.handleExperience?.(profile);
+        case "APPLICATION_QUESTIONS":
+          return W.handleEEO?.(profile);
+        default:
+          return false;
+      }
+    };
+
+    const previousRun = W.deterministicQueue || Promise.resolve();
+    const currentRun = previousRun
+      .catch(() => false)
+      .then(execute);
+    W.deterministicQueue = currentRun;
+
+    try {
+      return await currentRun;
+    } finally {
+      if (W.deterministicQueue === currentRun) W.deterministicQueue = null;
+    }
+  };
+
+  const collectWorkdayFields = async () => {
+    const standardFields = await window.FastApplyAgent2Controller.collectDefaultFields();
+    const structuralFields = getCurrentPage() === "EXPERIENCE_EDUCATION"
+      ? (W.collectReconciliationIssues?.(W.lastProfile) || [])
+      : [];
+    return [...standardFields, ...structuralFields];
+  };
+
+  const repairWorkdayFields = async () => {
+    if (!W.lastProfile) return;
+    await runWorkdayDeterministic(W.lastProfile);
+  };
+
+  const startEngine = () => {
+    chrome.storage.local.get(["autofillEnabled", "profileData"], values => {
+      if (values.autofillEnabled === false || !values.profileData) return;
+
+      let automaticRunInFlight = false;
+      const run = async () => {
+        if (automaticRunInFlight) return;
+        automaticRunInFlight = true;
+        try {
+          await runWorkdayDeterministic(values.profileData);
+        } finally {
+          automaticRunInFlight = false;
+        }
+      };
+
+      run();
+      window.setInterval(run, 2500);
+    });
+  };
+
+  window.FastApplyAgent2Controller?.register({
+    atsPlatform: "workday",
+    runDeterministic: runWorkdayDeterministic,
+    collectFields: collectWorkdayFields,
+    repairFields: repairWorkdayFields
   });
-};
 
-window.FastApplyAgent2Controller?.register({
-  atsPlatform: "workday",
-  runDeterministic: runWorkdayDeterministic
-});
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", startEngine);
-} else {
-  startEngine();
-}
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", startEngine, { once: true });
+  } else {
+    startEngine();
+  }
+})();

@@ -1,76 +1,99 @@
 // public/workday-eeo.js
 window.WorkdayEngine = window.WorkdayEngine || {};
 
-window.WorkdayEngine.handleEEO = (profile) => {
-  const pInfo = profile.personalInfo || {};
-  const eeo = profile.eeo || {};
-  const optOut = !!eeo.optOut;
+(() => {
+  const W = window.WorkdayEngine;
+  const U = window.FastApplyUtils;
 
-  const labels = document.querySelectorAll("label");
+  const fillChoice = async (container, target) => {
+    if (!container || !target) return false;
+    const radios = Array.from(container.querySelectorAll('input[type="radio"]'));
+    if (radios.length) return U.fillRadio(radios, target);
 
-  labels.forEach((label) => {
-    const questionText = label.innerText.toLowerCase().replace(/\*/g, "").trim();
-    if (!questionText) return;
+    const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+    if (checkboxes.length > 1) return U.fillCheckbox(checkboxes, target);
 
-    let container = label.parentElement;
-    for (let i = 0; i < 4; i++) {
-      if (container && container.querySelector("input, select, textarea, [data-automation-id='selectWidget']")) break;
-      if (container && container.parentElement) container = container.parentElement;
-    }
-    if (!container) return;
+    return W.fillWorkdayDropdown(container, target);
+  };
 
-    let textInput = container.querySelector("input[type='text']");
-    let radios = Array.from(container.querySelectorAll("input[type='radio']"));
-    let checkboxes = Array.from(container.querySelectorAll("input[type='checkbox']"));
+  W.handleEEO = async profile => {
+    if (W.isProcessingQuestions) return false;
+    W.isProcessingQuestions = true;
 
-    // Authorization
-    if (questionText.includes("authorized to work")) {
-      if (radios.length > 0 && eeo.authorizedToWork) window.FastApplyUtils.fillRadio(radios, eeo.authorizedToWork);
-      window.WorkdayEngine.fillWorkdayDropdown(container, eeo.authorizedToWork);
-    }
-    else if (questionText.includes("sponsorship") || questionText.includes("immigration filing")) {
-      if (radios.length > 0 && eeo.requireVisaFuture) window.FastApplyUtils.fillRadio(radios, eeo.requireVisaFuture);
-      window.WorkdayEngine.fillWorkdayDropdown(container, eeo.requireVisaFuture);
-    }
+    try {
+      const personal = profile.personalInfo || {};
+      const eeo = profile.eeo || {};
+      const optOut = eeo.optOut === true;
+      const labels = Array.from(document.querySelectorAll("label")).filter(W.isVisible);
 
-    // Voluntary Disclosures
-    else if (questionText.includes("gender")) {
-      const target = optOut ? "prefer not" : eeo.gender;
-      window.WorkdayEngine.fillWorkdayDropdown(container, target);
-    }
-    else if (questionText.includes("ethnicity") || questionText.includes("hispanic")) {
-      const target = optOut ? "prefer not" : eeo.ethnicity;
-      window.WorkdayEngine.fillWorkdayDropdown(container, target);
-    }
-    else if (questionText.includes("veterans status") || questionText.includes("veteran")) {
-      const target = optOut ? "prefer not" : eeo.veteran;
-      window.WorkdayEngine.fillWorkdayDropdown(container, target);
-    }
-    else if (questionText.includes("disability")) {
-      if (checkboxes.length > 0) {
-        const target = optOut ? "i do not want to answer" : (eeo.disability === "yes" ? "yes" : "no");
-        window.FastApplyUtils.fillCheckbox(checkboxes, target);
+      for (const label of labels) {
+        const question = W.normalizeText(W.getElementText(label));
+        if (!question) continue;
+        const container = W.getFieldContainer(label);
+        if (!container) continue;
+        const textInput = container.querySelector(
+          "input[type='text']:not([role='combobox']), textarea"
+        );
+        const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+
+        if (question.includes("authorized to work")) {
+          await fillChoice(container, eeo.authorizedToWork);
+        } else if (
+          question.includes("sponsorship") ||
+          question.includes("immigration filing") ||
+          question.includes("visa sponsorship")
+        ) {
+          await fillChoice(
+            container,
+            eeo.requireVisaFuture || eeo.requireVisaNow
+          );
+        } else if (question.includes("gender")) {
+          await fillChoice(container, optOut ? "prefer not" : eeo.gender);
+        } else if (
+          question.includes("ethnicity") ||
+          question.includes("race") ||
+          question.includes("hispanic")
+        ) {
+          await fillChoice(
+            container,
+            optOut ? "prefer not" : (eeo.ethnicity || eeo.race)
+          );
+        } else if (question.includes("veteran")) {
+          await fillChoice(container, optOut ? "prefer not" : eeo.veteran);
+        } else if (question.includes("disability")) {
+          const target = optOut
+            ? "I do not want to answer"
+            : eeo.disability;
+          await fillChoice(container, target);
+        } else if (
+          question.includes("read and agree") ||
+          question === "terms" ||
+          question.includes("certify that")
+        ) {
+          await fillChoice(container, "agree");
+        } else if (
+          question.includes("signature") ||
+          question.includes("enter your name")
+        ) {
+          W.fillTextField(
+            textInput,
+            `${personal.firstName || ""} ${personal.lastName || ""}`.trim()
+          );
+        } else if (question.includes("todays date") || question === "date") {
+          W.fillTextField(textInput, W.getTodayDate());
+        } else if (
+          question.includes("privacy") ||
+          question.includes("acknowledge")
+        ) {
+          const checkbox = checkboxes[0];
+          if (checkbox && !checkbox.checked) checkbox.click();
+          if (checkbox?.checked) checkbox.dataset.fa_filled = "true";
+        }
       }
-    }
 
-    // Terms & Signatures
-    else if (questionText.includes("read and agree") || questionText.includes("terms")) {
-      window.WorkdayEngine.fillWorkdayDropdown(container, "agree");
+      return true;
+    } finally {
+      W.isProcessingQuestions = false;
     }
-    else if (questionText.includes("name") && (questionText.includes("signature") || questionText.includes("enter your name"))) {
-      if (textInput && !document.querySelector('input[data-automation-id="legalNameSection_firstName"]')) {
-        window.FastApplyUtils.fillField(textInput, `${pInfo.firstName} ${pInfo.lastName || ""}`.trim());
-      }
-    }
-    else if (questionText.includes("today's date") || questionText === "date") {
-      if (textInput) window.FastApplyUtils.fillField(textInput, window.WorkdayEngine.getTodayDate());
-    }
-    
-    // Privacy statements
-    else if (questionText.includes("privacy") || questionText.includes("acknowledge") || questionText.includes("recruitment privacy statement")) {
-      if (checkboxes[0] && !checkboxes[0].checked) {
-        checkboxes[0].click();
-      }
-    }
-  });
-};
+  };
+})();

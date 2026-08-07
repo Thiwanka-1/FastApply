@@ -29,7 +29,7 @@ const buildMonthInputValue = (year, month) => {
   return `${numericYear}-${String(numericMonth).padStart(2, '0')}`;
 };
 
-export const toMonthInputValue = value => {
+export const toMonthInputValue = (value, fallbackMonth = 1) => {
   const text = String(value ?? '').trim();
 
   if (!text) return '';
@@ -46,6 +46,21 @@ export const toMonthInputValue = value => {
     return buildMonthInputValue(match[2], match[1]);
   }
 
+  match = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+
+  if (match) {
+    const first = Number(match[1]);
+    const second = Number(match[2]);
+    const month = first > 12 ? second : first;
+    return buildMonthInputValue(match[3], month);
+  }
+
+  match = text.match(/^(\d{4})$/);
+
+  if (match) {
+    return buildMonthInputValue(match[1], fallbackMonth);
+  }
+
   const normalizedText = text
     .replace(/[.,]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -56,6 +71,13 @@ export const toMonthInputValue = value => {
   if (match) {
     const month = MONTH_LOOKUP[match[1].toLowerCase()];
     return buildMonthInputValue(match[2], month);
+  }
+
+  match = normalizedText.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/);
+
+  if (match) {
+    const month = MONTH_LOOKUP[match[2].toLowerCase()];
+    return buildMonthInputValue(match[3], month);
   }
 
   return '';

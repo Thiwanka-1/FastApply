@@ -1,104 +1,132 @@
 // public/workday-experience-skills.js
 window.WorkdayEngine = window.WorkdayEngine || {};
 
-const safeTypeNative = (element, value) => {
-  if (!element) return;
-  element.focus();
-  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-  if (nativeSetter) {
-    nativeSetter.call(element, value);
-  } else {
-    element.value = value;
-  }
-  element.dispatchEvent(new Event('input', { bubbles: true }));
-};
+(() => {
+  const W = window.WorkdayEngine;
 
-const getSkillsInput = () => {
-  let input = document.querySelector('div[data-automation-id="formField-skills"] input[data-automation-id="searchBox"]');
-  if (!input) {
-      const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"])'));
-      input = inputs.find(i => window.FastApplyUtils.getLabelText(i).toLowerCase().includes("skills"));
-  }
-  return input;
-};
+  const getSkillsWrapper = () => {
+    return document.querySelector('[data-automation-id="formField-skills"]') ||
+      Array.from(document.querySelectorAll("label"))
+        .find(label => W.normalizeText(W.getElementText(label)).includes("skill"))
+        ?.parentElement ||
+      null;
+  };
 
-window.WorkdayEngine.handleSkills = async (skills) => {
-  if (!skills) return;
-  const skillList = Array.isArray(skills) ? skills.filter(Boolean) : String(skills).split(",").map((s) => s.trim()).filter(Boolean);
-  if (!skillList.length) return;
+  const getSkillsInput = wrapper => {
+    return wrapper?.querySelector(
+      'input[data-automation-id="searchBox"], input[role="combobox"], input:not([type="hidden"])'
+    ) || null;
+  };
 
-  let skillsInput = getSkillsInput();
-  if (!skillsInput) return;
+  W.getSelectedSkills = () => {
+    const wrapper = getSkillsWrapper();
+    if (!wrapper) return [];
 
-  let formWrapper = skillsInput.closest('div[data-automation-id="formField-skills"]') || skillsInput.parentElement.parentElement;
-  if (formWrapper && formWrapper.dataset.fa_skills_done === "true") return;
-  if (formWrapper) formWrapper.dataset.fa_skills_done = "true";
+    const selectedElements = Array.from(wrapper.querySelectorAll([
+      '[data-automation-id="selectedItem"]',
+      '[data-automation-id="multiSelectContainer"] [title]',
+      '[class*="selectedItem"]',
+      '[class*="multiValue"]'
+    ].join(",")));
 
-  for (const skill of skillList) {
-    if (!skill) continue;
+    const values = selectedElements.map(element => {
+      return String(
+        element.getAttribute("title") ||
+        W.getElementText(element)
+      )
+        .replace(/\b(remove|delete)\b/gi, "")
+        .trim();
+    }).filter(Boolean);
 
-    let currentInput = getSkillsInput();
-    if (!currentInput) break;
+    return [...new Map(values.map(value => [W.normalizeText(value), value])).values()];
+  };
 
-    const alreadySelected = document.querySelector(`[data-automation-id="selectedItem"][title="${skill}" i]`);
-    if (alreadySelected) continue;
+  const clearSkillSearch = (wrapper, input) => {
+    const clearButton = Array.from(wrapper.querySelectorAll("button"))
+      .find(button => {
+        const text = W.normalizeText(
+          button.getAttribute("aria-label") || W.getElementText(button)
+        );
+        return text === "clear" || text === "clear search";
+      });
 
-    // --- START CLEAN TRANSACTION ---
-    currentInput.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    currentInput.click();
-    currentInput.focus();
-    await window.WorkdayEngine.wait(300);
+    if (clearButton && W.isVisible(clearButton)) W.clickElement(clearButton);
+    else W.setInputValue(input, "");
+  };
 
-    safeTypeNative(currentInput, skill);
-    await window.WorkdayEngine.wait(500);
+  const isSkillSelected = target => {
+    const normalizedTarget = W.normalizeText(target);
+    return W.getSelectedSkills().some(skill => W.normalizeText(skill) === normalizedTarget);
+  };
 
-    currentInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 13 }));
-    currentInput.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", keyCode: 13 }));
-    
-    await window.WorkdayEngine.wait(1500); 
+  const selectSkill = async (wrapper, skill) => {
+    if (isSkillSelected(skill)) return true;
 
-    const listItems = Array.from(document.querySelectorAll('[data-automation-id="promptOption"], [role="option"], li')).filter(window.WorkdayEngine.isVisible);
-    
-    let matchedItem = listItems.find(item => {
-        const text = (item.innerText || item.textContent || "").trim().toLowerCase();
-        return text === skill.toLowerCase();
-    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const input = getSkillsInput(wrapper);
+      if (!input) return false;
 
-    if (!matchedItem) {
-        matchedItem = listItems.find(item => window.WorkdayEngine.workdaySmartMatch(item.innerText, skill));
-    }
+      clearSkillSearch(wrapper, input);
+      await W.wait(150);
+      W.clickElement(input);
+      W.setInputValue(input, skill);
 
-    if (matchedItem) {
-      const optionContainer = matchedItem.closest('li') || matchedItem.closest('[role="option"]') || matchedItem;
-      const checkbox = optionContainer.querySelector('.wd-icon-container, [type="checkbox"], [role="checkbox"]') || optionContainer;
-      
-      checkbox.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-      checkbox.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-      
-      if (typeof checkbox.click === 'function') {
-        checkbox.click();
-      } else {
-        checkbox.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      const match = await W.waitFor(() => {
+        const options = W.getWorkdayOptions(input);
+        const exact = options.find(option => {
+          return W.normalizeText(W.getElementText(option)) === W.normalizeText(skill);
+        });
+        return exact || W.findBestOption(options, skill);
+      }, { timeout: 7000, interval: 200 });
+
+      if (!match) {
+        clearSkillSearch(wrapper, input);
+        W.closeDropdown(input);
+        continue;
       }
-      
-      await window.WorkdayEngine.wait(800); 
+
+      W.clickElement(match);
+      const confirmed = await W.waitFor(() => isSkillSelected(skill), {
+        timeout: 3500,
+        interval: 150
+      });
+
+      if (confirmed) {
+        clearSkillSearch(wrapper, getSkillsInput(wrapper));
+        W.closeDropdown(getSkillsInput(wrapper));
+        await W.wait(250);
+        return true;
+      }
+
+      clearSkillSearch(wrapper, getSkillsInput(wrapper));
+      W.closeDropdown(getSkillsInput(wrapper));
+      await W.wait(300);
     }
 
-    // CLOSE DROPDOWN TO LOCK IN PILL
-    document.body.click();
-    await window.WorkdayEngine.wait(400);
+    return false;
+  };
 
-    // SAFELY CLEAR TEXT FOR NEXT LOOP USING WORKDAY'S NATIVE "X" BUTTON
-    const clearBtn = document.querySelector('div[data-automation-id="formField-skills"] [data-automation-id="clearSearchButton"]');
-    if (clearBtn && window.WorkdayEngine.isVisible(clearBtn)) {
-        clearBtn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-        if (typeof clearBtn.click === 'function') clearBtn.click();
-    } else {
-        let freshInput = getSkillsInput();
-        if (freshInput) safeTypeNative(freshInput, "");
+  W.handleSkills = async rawSkills => {
+    const skills = (Array.isArray(rawSkills) ? rawSkills : String(rawSkills || "").split(","))
+      .map(skill => String(skill || "").trim())
+      .filter(Boolean);
+    if (!skills.length || W.isProcessingSkills) return false;
+
+    const wrapper = getSkillsWrapper();
+    if (!wrapper || !getSkillsInput(wrapper)) return false;
+    W.isProcessingSkills = true;
+
+    try {
+      for (const skill of skills) {
+        await selectSkill(wrapper, skill);
+      }
+
+      const allSelected = skills.every(isSkillSelected);
+      if (allSelected) wrapper.dataset.fa_skills_done = "true";
+      else delete wrapper.dataset.fa_skills_done;
+      return allSelected;
+    } finally {
+      W.isProcessingSkills = false;
     }
-    
-    await window.WorkdayEngine.wait(600);
-    // --- END CLEAN TRANSACTION ---
-  }
-};
+  };
+})();

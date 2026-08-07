@@ -916,19 +916,41 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
      * for Greenhouse and other single-page application sites
      * where the URL or form can change without a full reload.
      */
-    const scanResponse = await scanPage();
+    let scanResponse = await scanPage();
 
     if (!scanResponse.success) {
       return scanResponse;
     }
 
-    const scan = scanResponse.data;
+    let scan = scanResponse.data;
+    let repairOnlyFields = scan.fields.filter(field => field?.repairOnly === true);
 
-    if (scan.fields.length === 0) {
+    if (
+      repairOnlyFields.length > 0 &&
+      typeof configuration?.repairFields === "function"
+    ) {
+      await configuration.repairFields(repairOnlyFields);
+      await delay(250);
+      scanResponse = await scanPage();
+
+      if (!scanResponse.success) {
+        return scanResponse;
+      }
+
+      scan = scanResponse.data;
+      repairOnlyFields = scan.fields.filter(field => field?.repairOnly === true);
+    }
+
+    const agentFields = scan.fields.filter(field => field?.repairOnly !== true);
+
+    if (agentFields.length === 0) {
+      const repairOnlyUnresolved = repairOnlyFields.length;
       const summary = {
         applicationId:
           currentApplicationId,
-        status: "complete",
+        status: repairOnlyUnresolved > 0
+          ? "ready_for_review"
+          : "complete",
         pageUrl: scan.pageUrl,
         atsPlatform:
           scan.atsPlatform,
@@ -943,7 +965,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         requestedFields: 0,
         answered: 0,
         reviewRequired: 0,
-        unresolved: 0,
+        unresolved: repairOnlyUnresolved,
         updatedAt:
           new Date().toISOString()
       };
@@ -988,11 +1010,11 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         scriptFilled:
           scan.scriptFilled,
         requestedFields:
-          scan.fields.length,
+          agentFields.length,
         answered: 0,
         reviewRequired: 0,
         unresolved:
-          scan.fields.length,
+          agentFields.length + repairOnlyFields.length,
         error: "",
         startedAt,
         updatedAt:
@@ -1019,7 +1041,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
             scan.scriptFilled
         },
         fields:
-          scan.fields
+          agentFields
       };
 
       const response =
@@ -1088,7 +1110,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         reviewRequiredFields:
           appliedSummary.reviewRequired,
         unresolvedAfterApply:
-          appliedSummary.unresolved,
+          appliedSummary.unresolved + repairOnlyFields.length,
         persistenceWarning,
         completedAt
       };
@@ -1118,13 +1140,13 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         scriptFilled:
           scan.scriptFilled,
         requestedFields:
-          scan.fields.length,
+          agentFields.length,
         answered:
           appliedSummary.answered,
         reviewRequired:
           appliedSummary.reviewRequired,
         unresolved:
-          appliedSummary.unresolved,
+          appliedSummary.unresolved + repairOnlyFields.length,
         startedAt,
         updatedAt:
           completedAt
@@ -1239,6 +1261,8 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         options?.collectFields,
       applyAnswers:
         options?.applyAnswers,
+      repairFields:
+        options?.repairFields,
       extractJobContext:
         options?.extractJobContext
     };
@@ -1282,6 +1306,8 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
     register,
     scanPage,
     runAgent2,
-    getPageState
+    getPageState,
+    collectDefaultFields,
+    applyDefaultAnswers
   };
 })();

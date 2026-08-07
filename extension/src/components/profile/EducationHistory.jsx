@@ -280,7 +280,8 @@ export default function EducationHistory({
                   <input
                     type="month"
                     value={toMonthInputValue(
-                      education.startDate
+                      education.startDate,
+                      1
                     )}
                     onChange={event => {
                       updateMonth(
@@ -305,7 +306,8 @@ export default function EducationHistory({
                   <input
                     type="month"
                     value={toMonthInputValue(
-                      education.endDate
+                      education.endDate,
+                      12
                     )}
                     onChange={event => {
                       updateMonth(

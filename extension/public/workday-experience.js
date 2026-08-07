@@ -1,78 +1,181 @@
 // public/workday-experience.js
 window.WorkdayEngine = window.WorkdayEngine || {};
 
-window.WorkdayEngine.openSectionIfNeeded = async (sectionKeyword, hasData) => {
-  const headings = Array.from(document.querySelectorAll("h2, h3, h4")).filter(h => h.innerText.toLowerCase().includes(sectionKeyword));
-  if (headings.length === 0) return;
-  
-  const heading = headings[0];
-  const sectionRoot = heading.closest('[role="group"]') || heading.parentElement.parentElement; 
-  if (!sectionRoot) return;
-  
-  const addBtn = Array.from(sectionRoot.querySelectorAll("button")).find(b => b.innerText.trim() === "Add" && b.dataset.fa_expanded !== "true");
-  
-  if (addBtn) {
-    addBtn.dataset.fa_expanded = "true"; 
-    if (sectionKeyword === "certification" || !hasData) return;
-    
-    addBtn.click();
-    await window.WorkdayEngine.wait(1200); 
-  }
-};
+(() => {
+  const W = window.WorkdayEngine;
 
-window.WorkdayEngine.handleExperience = async (profile) => {
-  // CRITICAL FIX: THE PAGE LOCK
-  // This stops the 1.5s interval from launching a second overlapping run!
-  if (window.WorkdayEngine.isProcessingExperience) return;
-  window.WorkdayEngine.isProcessingExperience = true;
+  const buttonText = button => W.normalizeText(
+    W.getElementText(button) || button.getAttribute("aria-label")
+  );
 
-  try {
-      const workArr = profile.workHistory || [];
-      const eduArr = profile.educationHistory || [];
-      const links = profile.websitesAndSkills || {};
+  W.getSectionEntryCount = (section, anchorPattern) => {
+    if (!section) return 0;
+    return W.querySection(section, "label")
+      .filter(label => anchorPattern.test(W.normalizeText(W.getElementText(label))))
+      .length;
+  };
 
-      await window.WorkdayEngine.openSectionIfNeeded("certification", false);
-      await window.WorkdayEngine.openSectionIfNeeded("work experience", workArr.length > 0);
-      await window.WorkdayEngine.openSectionIfNeeded("education", eduArr.length > 0);
-      await window.WorkdayEngine.openSectionIfNeeded("websites", links.portfolio || links.github);
+  W.ensureSectionEntries = async ({
+    section,
+    expectedCount,
+    anchorPattern
+  }) => {
+    if (!section || expectedCount <= 0) return 0;
+    const cappedExpected = Math.min(Number(expectedCount) || 0, 25);
+    let currentCount = W.getSectionEntryCount(section, anchorPattern);
 
-      const labels = document.querySelectorAll("label");
-      labels.forEach((label) => {
-        const questionText = label.innerText.toLowerCase().replace(/\*/g, "").trim();
-        if (!questionText) return;
+    while (currentCount < cappedExpected) {
+      const expectedButton = currentCount === 0 ? "add" : "add another";
+      const buttons = W.querySection(section, "button").filter(W.isVisible);
+      const addButton = buttons.find(button => buttonText(button) === expectedButton) ||
+        buttons.find(button => buttonText(button) === "add another") ||
+        buttons.find(button => buttonText(button) === "add");
 
-        let container = label.parentElement;
-        for (let i = 0; i < 4; i++) {
-          if (container && container.querySelector("input:not([type='hidden']), select, textarea, [data-automation-id='selectWidget']")) break;
-          if (container && container.parentElement) container = container.parentElement;
-        }
-        if (!container) return;
+      if (!addButton || addButton.dataset.fa_add_processing === "true") break;
 
-        let textInput = container.querySelector("input:not([type='hidden']):not([type='checkbox']):not([type='radio']), textarea");
+      const countBeforeClick = currentCount;
+      addButton.dataset.fa_add_processing = "true";
+      const clicked = W.clickElement(addButton);
+      delete addButton.dataset.fa_add_processing;
+      if (!clicked) break;
 
-        if (textInput && textInput.dataset.fa_filled !== "true") {
-          if (questionText.startsWith("url") || questionText.includes("website")) { window.FastApplyUtils.fillField(textInput, links.portfolio || links.github); }
-          else if (questionText.includes("linkedin")) { window.FastApplyUtils.fillField(textInput, links.linkedin); }
-          else if (questionText.includes("twitter")) { window.FastApplyUtils.fillField(textInput, links.twitter); }
-          else if (questionText.includes("facebook")) { window.FastApplyUtils.fillField(textInput, links.facebook); }
-        }
-      });
+      const increasedCount = await W.waitFor(() => {
+        const count = W.getSectionEntryCount(section, anchorPattern);
+        return count > countBeforeClick ? count : null;
+      }, { timeout: 6500, interval: 180 });
 
-      if (window.WorkdayEngine.handleWork) {
-        const isExpandingWork = await window.WorkdayEngine.handleWork(workArr);
-        if (isExpandingWork) return; 
+      if (!increasedCount) break;
+      currentCount = increasedCount;
+      await W.wait(250);
+    }
+
+    return currentCount;
+  };
+
+  const fillWebsites = profile => {
+    const links = profile.websitesAndSkills || {};
+    const section = W.findSection(["websites", "website"]);
+    const labels = section
+      ? W.querySection(section, "label")
+      : Array.from(document.querySelectorAll("label"));
+
+    labels.forEach(label => {
+      const question = W.normalizeText(W.getElementText(label));
+      const container = W.getFieldContainer(label);
+      const input = container?.querySelector(
+        "input:not([type='hidden']):not([type='checkbox']):not([type='radio']), textarea"
+      );
+      if (!input) return;
+
+      if (question.includes("linkedin")) W.fillTextField(input, links.linkedin);
+      else if (question.includes("github")) W.fillTextField(input, links.github);
+      else if (question.includes("twitter")) W.fillTextField(input, links.twitter);
+      else if (question.includes("facebook")) W.fillTextField(input, links.facebook);
+      else if (question.includes("url") || question.includes("website")) {
+        W.fillTextField(input, links.portfolio || links.github || links.linkedin);
       }
+    });
+  };
 
-      if (window.WorkdayEngine.handleEducation) {
-        const isExpandingEdu = await window.WorkdayEngine.handleEducation(eduArr);
-        if (isExpandingEdu) return; 
-      }
+  W.collectReconciliationIssues = profile => {
+    if (!profile) return [];
+    const issues = [];
+    const workHistory = Array.isArray(profile.workHistory) ? profile.workHistory : [];
+    const educationHistory = Array.isArray(profile.educationHistory)
+      ? profile.educationHistory
+      : [];
+    const rawSkills = profile.websitesAndSkills?.skills;
+    const skills = (Array.isArray(rawSkills) ? rawSkills : String(rawSkills || "").split(","))
+      .map(skill => String(skill || "").trim())
+      .filter(Boolean);
 
-      if (window.WorkdayEngine.handleSkills && links.skills) {
-        await window.WorkdayEngine.handleSkills(links.skills);
+    const workSection = W.findSection("work experience");
+    if (workSection && workHistory.length) {
+      const actual = W.getSectionEntryCount(workSection, /^job title$/);
+      if (actual < workHistory.length) {
+        issues.push({
+          fieldId: "fa_workday_structure_work_history",
+          label: `Work Experience entries: ${actual} of ${workHistory.length} are present`,
+          type: "structure",
+          required: true,
+          options: [],
+          currentValue: String(actual),
+          maxLength: null,
+          repairOnly: true
+        });
       }
-  } finally {
-      // RELEASE THE LOCK
-      window.WorkdayEngine.isProcessingExperience = false;
-  }
-};
+    }
+
+    const educationSection = W.findSection("education");
+    if (educationSection && educationHistory.length) {
+      const actual = W.getSectionEntryCount(
+        educationSection,
+        /^(school|school or university|university)$/
+      );
+      if (actual < educationHistory.length) {
+        issues.push({
+          fieldId: "fa_workday_structure_education_history",
+          label: `Education entries: ${actual} of ${educationHistory.length} are present`,
+          type: "structure",
+          required: true,
+          options: [],
+          currentValue: String(actual),
+          maxLength: null,
+          repairOnly: true
+        });
+      }
+    }
+
+    const skillsFieldPresent = Boolean(
+      document.querySelector('[data-automation-id="formField-skills"]') ||
+      Array.from(document.querySelectorAll("label")).some(label => {
+        return W.isVisible(label) &&
+          W.normalizeText(W.getElementText(label)).includes("skill");
+      })
+    );
+
+    if (skills.length && skillsFieldPresent) {
+      const selected = W.getSelectedSkills?.() || [];
+      const selectedKeys = new Set(selected.map(W.normalizeText));
+      const missingSkills = skills.filter(skill => !selectedKeys.has(W.normalizeText(skill)));
+      if (missingSkills.length) {
+        issues.push({
+          fieldId: "fa_workday_structure_skills",
+          label: `Skills not selected: ${missingSkills.join(", ")}`,
+          type: "structure",
+          required: false,
+          options: [],
+          currentValue: selected.join(", "),
+          maxLength: null,
+          repairOnly: true
+        });
+      }
+    }
+
+    return issues;
+  };
+
+  W.handleExperience = async profile => {
+    if (W.isProcessingExperience) return false;
+    W.isProcessingExperience = true;
+
+    try {
+      const workHistory = Array.isArray(profile.workHistory) ? profile.workHistory : [];
+      const educationHistory = Array.isArray(profile.educationHistory)
+        ? profile.educationHistory
+        : [];
+      const skills = profile.websitesAndSkills?.skills;
+
+      fillWebsites(profile);
+
+      if (W.handleWork) await W.handleWork(workHistory);
+      if (W.handleEducation) await W.handleEducation(educationHistory);
+      if (W.handleSkills) await W.handleSkills(skills);
+
+      W.lastReconciliationIssues = W.collectReconciliationIssues(profile);
+      return W.lastReconciliationIssues.length === 0;
+    } finally {
+      W.isProcessingExperience = false;
+    }
+  };
+})();
