@@ -538,7 +538,7 @@ const runAgent2ForRemainingFields = async () => {
       response.data?.applicationId ||
       currentApplicationId;
 
-    const summary = U.applyAgentAnswers(
+    const summary = await U.applyAgentAnswers(
       response.data?.answers || []
     );
 
@@ -654,7 +654,7 @@ const startGenericEngine = async () => {
     return;
   }
 
-  const profile = await loadProfile();
+  let profile = await loadProfile();
 
   if (!profile) {
     console.warn(
@@ -677,12 +677,10 @@ const startGenericEngine = async () => {
   );
 
   const runCycle = () => {
-  handleGenericCustoms(profile);
-};
+    handleGenericCustoms(profile);
+  };
 
   runCycle();
-
-  setInterval(runCycle, 2500);
 
   const observer = new MutationObserver(mutations => {
     const hasAddedFields = mutations.some(mutation => {
@@ -709,6 +707,12 @@ const startGenericEngine = async () => {
   observer.observe(document.documentElement, {
     childList: true,
     subtree: true
+  });
+
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local" && changes.profileData?.newValue) {
+      profile = changes.profileData.newValue;
+    }
   });
 };
 

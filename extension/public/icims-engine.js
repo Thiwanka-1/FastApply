@@ -6,7 +6,32 @@ window.ICIMSEngine.wait = (ms) => new Promise((resolve) => setTimeout(resolve, m
 
 // --- 1. CORE INJECTOR ---
 window.ICIMSEngine.setNativeValue = (element, value) => {
-    if (!element || !value || element.dataset.fa_filled === "true") return;
+    const utils = window.FastApplyUtils;
+    if (
+        !element ||
+        !value ||
+        element.dataset.fa_filled === "true" ||
+        utils?.isProtectedFromDeterministicFill?.(element)
+    ) return false;
+
+    const selected = element.tagName === "SELECT"
+        ? element.options?.[element.selectedIndex]
+        : null;
+    const selectedIsPlaceholder = selected && /^(select|select one|choose|choose one|please select|none)$/i.test(
+        String(selected.text || selected.label || selected.value || "").trim()
+    );
+    if (
+        (element.tagName === "SELECT" && selected && !selected.disabled && !selectedIsPlaceholder && String(selected.value || "").trim()) ||
+        (element.tagName !== "SELECT" && String(element.value || "").trim())
+    ) return false;
+
+    const label = String(utils?.getLabelText?.(element) || "").toLowerCase();
+    const target = element.type === "url" || /url|website|linkedin|github|portfolio/.test(label)
+        ? utils?.ensureHttpUrl?.(value)
+        : element.type === "tel" || /phone|telephone|mobile/.test(label)
+            ? utils?.formatPhoneNumber?.(value)
+            : String(value);
+    if (!target) return false;
     element.focus();
     
     let proto = window.HTMLInputElement.prototype;
@@ -19,19 +44,25 @@ window.ICIMSEngine.setNativeValue = (element, value) => {
     const nativeSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
     
     if (nativeSetter) {
-        nativeSetter.call(element, value);
+        nativeSetter.call(element, target);
     } else {
-        element.value = value;
+        element.value = target;
     }
     
     element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
     element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
     element.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+    if (!String(element.value || "").trim()) return false;
     element.dataset.fa_filled = "true";
+    utils?.setValueOwner?.(element, "deterministic");
+    return true;
 };
 
 // --- 2. FUZZY MATCHER (Upgraded for Degrees & Countries) ---
 window.ICIMSEngine.smartMatch = (optText, targetValue) => {
+    if (typeof window.FastApplyUtils?.smartMatch === "function") {
+        return window.FastApplyUtils.smartMatch(optText, targetValue);
+    }
     const o = String(optText || "").toLowerCase().trim();
     const t = String(targetValue || "").toLowerCase().trim();
     if (!o || !t) return false;
@@ -139,14 +170,22 @@ window.ICIMSEngine.fillRadioGroup = (questionText, answerValue) => {
     for (let i = 0; i < 5; i++) {
         if (!container) break;
         const radios = Array.from(container.querySelectorAll('input[type="radio"]'));
-        if (radios.length > 0 && !radios[0].dataset.fa_filled) {
+        if (
+            radios.length > 0 &&
+            !radios[0].dataset.fa_filled &&
+            !radios.some(radio => radio.checked) &&
+            !radios.some(radio => window.FastApplyUtils?.isProtectedFromDeterministicFill?.(radio))
+        ) {
             const labels = Array.from(container.querySelectorAll('label'));
             let matchedLabel = labels.find(l => window.ICIMSEngine.smartMatch(l.innerText, answerValue));
             if (matchedLabel) {
                 const radio = container.querySelector(`input[id="${matchedLabel.htmlFor}"]`) || matchedLabel.querySelector('input[type="radio"]');
                 if (radio && !radio.checked) {
                     radio.click(); 
-                    radios.forEach(r => r.dataset.fa_filled = "true"); 
+                    radios.forEach(r => {
+                        r.dataset.fa_filled = "true";
+                        window.FastApplyUtils?.setValueOwner?.(r, "deterministic");
+                    });
                 }
             }
             break;
@@ -194,13 +233,14 @@ window.ICIMSEngine.runAutofill = async (profile) => {
         window.ICIMSEngine.fillSelectDropdown("State/Province", c.state, "Addresses");
 
         // PAGE 2: Candidate Questions
-        window.ICIMSEngine.fillSelectDropdown("18 years of age or older", "Yes"); // Standard application default
-        window.ICIMSEngine.fillSelectDropdown("Have you previously been employed", "No"); // Standard default
-        
         // Compute Sponsorship Need based on DB model (handles both current and future)
-        const sponsorshipNeeded = (e.requireVisaNow && e.requireVisaNow.toLowerCase() === 'yes') || 
-                                  (e.requireVisaFuture && e.requireVisaFuture.toLowerCase() === 'yes') ? "Yes" : "No";
-        window.ICIMSEngine.fillSelectDropdown("require sponsorship", sponsorshipNeeded);
+        const visaAnswers = [e.requireVisaNow, e.requireVisaFuture]
+            .map(value => String(value || '').trim().toLowerCase())
+            .filter(Boolean);
+        if (visaAnswers.length > 0) {
+            const sponsorshipNeeded = visaAnswers.some(value => value === 'yes') ? "Yes" : "No";
+            window.ICIMSEngine.fillSelectDropdown("require sponsorship", sponsorshipNeeded);
+        }
 
         // Education Question mapping
         if (profile.educationHistory && profile.educationHistory.length > 0) {
@@ -229,9 +269,32 @@ window.ICIMSEngine.runAutofill = async (profile) => {
 const startICIMSEngine = () => {
     chrome.storage.local.get(["autofillEnabled", "profileData"], (res) => {
         if (res.autofillEnabled === false || !res.profileData) return;
-        setInterval(() => {
-            window.ICIMSEngine.runAutofill(res.profileData);
-        }, 1500); 
+        let currentProfile = res.profileData;
+        let pendingRun = 0;
+        const run = () => window.ICIMSEngine.runAutofill(currentProfile);
+        const schedule = () => {
+            clearTimeout(pendingRun);
+            pendingRun = setTimeout(run, 300);
+        };
+
+        run();
+        const observer = new MutationObserver(mutations => {
+            const addedFormControls = mutations.some(mutation => {
+                return Array.from(mutation.addedNodes || []).some(node => {
+                    return node.nodeType === Node.ELEMENT_NODE &&
+                        (node.matches?.('input, select, textarea, form') ||
+                         node.querySelector?.('input, select, textarea, form'));
+                });
+            });
+            if (addedFormControls) schedule();
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+
+        chrome.storage.onChanged.addListener((changes, areaName) => {
+            if (areaName === "local" && changes.profileData?.newValue) {
+                currentProfile = changes.profileData.newValue;
+            }
+        });
     });
 };
 

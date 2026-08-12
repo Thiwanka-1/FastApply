@@ -20,9 +20,6 @@ const handleCustomQuestions = (profile) => {
     if (questionText.includes('highest level of education') && selects.length > 0 && highestEdu) {
       if (window.FastApplyUtils.fillDropdown(selects[0], highestEdu)) filledAnything = true;
     }
-    if ((questionText.includes('18+ years old') || questionText.includes('18 or older')) && radios.length > 0) {
-      if (window.FastApplyUtils.fillRadio(radios, 'yes')) filledAnything = true;
-    }
     if (questionText.includes('native language') && selects.length > 0) {
       const nativeLang = pInfo.languages?.find(l => l.proficiency?.toLowerCase() === 'native');
       if (nativeLang && window.FastApplyUtils.fillDropdown(selects[0], nativeLang.language)) filledAnything = true;
@@ -42,19 +39,29 @@ const handleCustomQuestions = (profile) => {
     if ((questionText.includes('sponsorship') || questionText.includes('visa')) && radios.length > 0 && eeo.requireVisaFuture) {
       if (window.FastApplyUtils.fillRadio(radios, eeo.requireVisaFuture)) filledAnything = true;
     }
-    if (questionText.includes('background check') && radios.length > 0) {
-      if (window.FastApplyUtils.fillRadio(radios, 'yes')) filledAnything = true; // Auto-yes for background checks
-    }
-
     // --- Demographics / EEO ---
-    if (questionText.includes('gender') || questionText.includes('sex') || questionText.includes('identify as')) {
+    if (
+      (questionText.includes('gender') || questionText.includes('sex') || questionText.includes('identify as')) &&
+      !questionText.includes('transgender') &&
+      !questionText.includes('sexual orientation') &&
+      !questionText.includes('race') &&
+      !questionText.includes('ethnic')
+    ) {
       const target = eeo.optOut ? "decline" : eeo.gender;
       if (target && target.trim() !== "") { 
         if (selects.length > 0 && window.FastApplyUtils.fillDropdown(selects[0], target)) filledAnything = true; 
         else if (radios.length > 0 && window.FastApplyUtils.fillRadio(radios, target)) filledAnything = true;
       }
     }
-    if (questionText.includes('race') || questionText.includes('ethnic')) {
+    if (questionText.includes('race')) {
+      const target = eeo.optOut ? "decline" : eeo.race;
+      if (target && target.trim() !== "") {
+        if (selects.length > 0 && window.FastApplyUtils.fillDropdown(selects[0], target)) filledAnything = true;
+        else if (radios.length > 0 && window.FastApplyUtils.fillRadio(radios, target)) filledAnything = true;
+        else if (checkboxes.length > 0 && window.FastApplyUtils.fillCheckbox(checkboxes, target)) filledAnything = true;
+      }
+    }
+    if (questionText.includes('ethnic') || questionText.includes('hispanic')) {
       const target = eeo.optOut ? "decline" : eeo.ethnicity;
       if (target && target.trim() !== "") { 
         if (selects.length > 0 && window.FastApplyUtils.fillDropdown(selects[0], target)) filledAnything = true; 
@@ -97,7 +104,9 @@ const attemptAutofill = (profile) => {
   if (window.FastApplyUtils.fillField(phoneInput, cInfo.phone)) filledAnything = true;
   
   if (locationInput && cInfo.city && locationInput.dataset.fa_filled !== "true") { 
-    const locString = `${cInfo.city}, ${cInfo.country || ''}`.trim();
+    const locString = [cInfo.city, cInfo.state, cInfo.country]
+      .filter(Boolean)
+      .join(", ");
     if (window.FastApplyUtils.fillAutocomplete(locationInput, hiddenLocationInput, locString)) filledAnything = true;
   }
   

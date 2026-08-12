@@ -119,34 +119,9 @@ const getTextInputFromContainer = (container, labelOrBlock = null) => {
 const getRadioGroup = (container) =>
   Array.from(container?.querySelectorAll('input[type="radio"]') || []);
 
-const getCheckboxGroup = (container) =>
-  Array.from(container?.querySelectorAll('input[type="checkbox"]') || []);
-
 const markContainerFilled = (container) => {
   if (!container) return;
   container.dataset.fa_filled = "true";
-};
-
-const unmarkDropdownProcessing = (container) => {
-  if (!container) return;
-  container.dataset.fa_dropdown_processing = "false";
-};
-
-const getOptionText = (opt) => normalizeText(getVisibleText(opt));
-
-const chooseBestBambooOption = (options, targetValue) => {
-  const target = normalizeText(targetValue);
-  if (!target) return null;
-
-  const arr = Array.from(options || []);
-  if (!arr.length) return null;
-
-  return (
-    arr.find((opt) => window.FastApplyUtils.smartMatch(getVisibleText(opt), targetValue)) ||
-    arr.find((opt) => getOptionText(opt) === target) ||
-    arr.find((opt) => getOptionText(opt).startsWith(target)) ||
-    arr.find((opt) => getOptionText(opt).includes(target))
-  );
 };
 
 // --- REVISED BAMBOOHR DROPDOWN FILLER ---
@@ -154,12 +129,11 @@ const fillBambooDropdown = (container, targetValue) => {
   if (!container || !targetValue) return false;
   if (container.dataset.fa_dropdown_processing === "true") return false;
   if (container.dataset.fa_filled === "true") return false;
-  if (isDropdownOpen()) return false;
 
   // 1. Native select
   const nativeSelect = container.querySelector("select");
   if (nativeSelect && !isActuallyFilled(nativeSelect)) {
-    if (window.FastApplyUtils.fillDropdown(nativeSelect, targetValue)) {
+    if (window.FastApplyUtils.fillDropdown(nativeSelect, targetValue, { exact: true })) {
       markContainerFilled(container);
       return true;
     }
@@ -171,109 +145,13 @@ const fillBambooDropdown = (container, targetValue) => {
     container.querySelector('input[type="text"]') ||
     container.querySelector('input[class*="search"]');
 
-  // 3. Button trigger fallback
-  const triggerButton =
-    container.querySelector('[role="combobox"]') ||
-    container.querySelector("button");
+  if (!input || input.readOnly || input.disabled) return false;
 
-  const trigger = input || triggerButton;
-  if (!trigger) return false;
-
-  container.dataset.fa_dropdown_processing = "true";
-
-  try {
-    trigger.focus?.();
-    trigger.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-    trigger.click?.();
-
-    if (input && !input.readOnly && !input.disabled) {
-      window.FastApplyUtils.fillField(input, targetValue);
-    }
-
-    setTimeout(() => {
-      let options = Array.from(
-        document.querySelectorAll('[role="option"], li[role="option"], ul[role="listbox"] li, li')
-      ).filter((opt) => getVisibleText(opt));
-
-      let matchedOption = chooseBestBambooOption(options, targetValue);
-
-      if (!matchedOption && input) {
-        input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown", keyCode: 40 }));
-
-        setTimeout(() => {
-          options = Array.from(
-            document.querySelectorAll('[role="option"], li[role="option"], ul[role="listbox"] li, li')
-          ).filter((opt) => getVisibleText(opt));
-
-          matchedOption = chooseBestBambooOption(options, targetValue);
-
-          if (matchedOption) {
-            matchedOption.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-            matchedOption.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-            matchedOption.click();
-            markContainerFilled(container);
-            try {
-              trigger.style.border = "2px solid #8b5cf6";
-              trigger.style.backgroundColor = "#f5f3ff";
-            } catch (_) {}
-          } else {
-            input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 13 }));
-            input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", keyCode: 13 }));
-          }
-
-          unmarkDropdownProcessing(container);
-        }, 250);
-
-        return;
-      }
-
-      if (matchedOption) {
-        matchedOption.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-        matchedOption.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-        matchedOption.click();
-        markContainerFilled(container);
-        try {
-          trigger.style.border = "2px solid #8b5cf6";
-          trigger.style.backgroundColor = "#f5f3ff";
-        } catch (_) {}
-      } else if (input) {
-        input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown", keyCode: 40 }));
-        input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", keyCode: 13 }));
-        input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter", keyCode: 13 }));
-      }
-
-      unmarkDropdownProcessing(container);
-    }, 700);
-
-    return true;
-  } catch (error) {
-    console.warn("[FastApply] BambooHR dropdown fill failed:", error);
-    unmarkDropdownProcessing(container);
-    return false;
-  }
-};
-
-const mapCitizenshipAnswer = (authorizedToWork, requireVisaFuture, country) => {
-  const auth = normalizeText(authorizedToWork);
-  const visa = normalizeText(requireVisaFuture);
-  const c = normalizeText(country);
-
-  const isUS = c === "united states" || c === "usa" || c === "us";
-
-  if (auth === "yes" && visa === "no") {
-    if (isUS) return "i am a u.s. citizen/permanent resident";
-    return "non-citizen authorized to work for any u.s. employer";
-  }
-
-  if (auth === "yes" && visa === "yes") {
-    return "non-citizen seeking work authorization";
-  }
-
-  if (auth === "no") {
-    return "non-citizen seeking work authorization";
-  }
-
-  return "";
+  // Searchable dropdowns are accepted only after the shared autocomplete
+  // adapter finds and clicks one exact or uniquely matching visible option.
+  // Button-only custom controls are left unresolved for the Agent/manual audit
+  // instead of guessing with Enter.
+  return window.FastApplyUtils.fillAutocomplete(input, null, targetValue);
 };
 
 const fillSpecificYesNoRadios = (radios, answer) => {
@@ -307,7 +185,6 @@ const handleBambooCustoms = (profile) => {
 
       const textInput = getTextInputFromContainer(container, block);
       const radios = getRadioGroup(container);
-      const checkboxes = getCheckboxGroup(container);
 
       // --- 1. BASIC INFORMATION ---
       if (questionText === "first name") {
@@ -358,21 +235,11 @@ const handleBambooCustoms = (profile) => {
       }
 
       // --- 4. CUSTOM RADIO QUESTIONS ---
-      else if (questionText.includes("citizenship") || questionText.includes("employment eligibility")) {
-        if (radios.length > 0) {
-          const target = mapCitizenshipAnswer(
-            eeo.authorizedToWork,
-            eeo.requireVisaFuture,
-            cInfo.country
-          );
-          if (target && window.FastApplyUtils.fillRadio(radios, target)) filledAnything = true;
-        }
-      }
       else if (
         questionText.includes("legally authorized to work in the united states") ||
         questionText.includes("authorized to work in the united states")
       ) {
-        if (radios.length > 0) {
+        if (radios.length > 0 && normalizeText(eeo.authorizedToWork)) {
           const answer = normalizeText(eeo.authorizedToWork) === "yes" ? "yes" : "no";
           if (fillSpecificYesNoRadios(radios, answer)) filledAnything = true;
         }
@@ -382,33 +249,45 @@ const handleBambooCustoms = (profile) => {
         questionText.includes("future require visa") ||
         questionText.includes("will you now or in the future require")
       ) {
-        if (radios.length > 0) {
-          const answer = normalizeText(eeo.requireVisaFuture || eeo.requireVisaNow) === "yes" ? "yes" : "no";
+        const visaAnswer = normalizeText(eeo.requireVisaFuture || eeo.requireVisaNow);
+        if (radios.length > 0 && visaAnswer) {
+          const answer = visaAnswer === "yes" ? "yes" : "no";
           if (fillSpecificYesNoRadios(radios, answer)) filledAnything = true;
         }
       }
       else if (questionText.includes("based in")) {
         const country = normalizeText(cInfo.country || "");
+        if (!country) return;
+        const isUnitedStates = [
+          "us",
+          "usa",
+          "united states",
+          "united states of america"
+        ].includes(country);
+        const asksUnitedStates = /\b(usa|u s|united states|united states of america)\b/.test(questionText);
         const isTargetCountry =
           questionText.includes(country) ||
-          (country === "united states" && (questionText.includes("usa") || questionText.includes("united states")));
+          (isUnitedStates && asksUnitedStates);
 
         if (radios.length > 0 && window.FastApplyUtils.fillRadio(radios, isTargetCountry ? "yes" : "no")) {
           filledAnything = true;
         }
       }
-      else if (questionText.includes("authorized") && radios.length > 0) {
+      else if (
+        questionText.includes("authorized") &&
+        radios.length > 0 &&
+        normalizeText(eeo.authorizedToWork)
+      ) {
         const answer = normalizeText(eeo.authorizedToWork) === "yes" ? "yes" : "no";
         if (fillSpecificYesNoRadios(radios, answer)) filledAnything = true;
       }
-      else if ((questionText.includes("visa") || questionText.includes("sponsorship")) && radios.length > 0) {
+      else if (
+        (questionText.includes("visa") || questionText.includes("sponsorship")) &&
+        radios.length > 0 &&
+        normalizeText(eeo.requireVisaFuture || eeo.requireVisaNow)
+      ) {
         const answer = normalizeText(eeo.requireVisaFuture || eeo.requireVisaNow) === "yes" ? "yes" : "no";
         if (fillSpecificYesNoRadios(radios, answer)) filledAnything = true;
-      }
-
-      // --- 5. CHECKBOX QUESTIONS IF ANY ---
-      else if (checkboxes.length > 0 && questionText.includes("agree")) {
-        if (window.FastApplyUtils.fillCheckbox(checkboxes, "yes")) filledAnything = true;
       }
     });
 

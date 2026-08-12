@@ -30,23 +30,40 @@ const buildMonthInputValue = (year, month) => {
 };
 
 export const toMonthInputValue = (value, fallbackMonth = 1) => {
-  const text = String(value ?? '').trim();
+  let text = String(value ?? '').trim();
 
   if (!text) return '';
 
-  let match = text.match(/^(\d{4})-(\d{1,2})(?:-\d{1,2})?(?:T.*)?$/);
+  // Resume extractors sometimes preserve the complete range in one value.
+  // A month input can only display one side, so use the first side for starts
+  // and the final side for ends without splitting ISO values such as 2024-06.
+  const rangeParts = text
+    .split(/\s+(?:-|\u2013|\u2014|to|through|until)\s+/i)
+    .map(part => part.trim())
+    .filter(Boolean);
+  if (rangeParts.length > 1) {
+    text = fallbackMonth === 12
+      ? rangeParts[rangeParts.length - 1]
+      : rangeParts[0];
+  }
+
+  text = text
+    .replace(/^(?:from|since|started|expected(?: graduation)?|graduated|graduation)\s*:?[\s-]*/i, '')
+    .trim();
+
+  let match = text.match(/^(\d{4})[./-](\d{1,2})(?:[./-]\d{1,2})?(?:[T\s].*)?$/);
 
   if (match) {
     return buildMonthInputValue(match[1], match[2]);
   }
 
-  match = text.match(/^(\d{1,2})[/-](\d{4})$/);
+  match = text.match(/^(\d{1,2})[./-](\d{4})$/);
 
   if (match) {
     return buildMonthInputValue(match[2], match[1]);
   }
 
-  match = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+  match = text.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
 
   if (match) {
     const first = Number(match[1]);
@@ -62,7 +79,7 @@ export const toMonthInputValue = (value, fallbackMonth = 1) => {
   }
 
   const normalizedText = text
-    .replace(/[.,]/g, ' ')
+    .replace(/[.,/-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -78,6 +95,20 @@ export const toMonthInputValue = (value, fallbackMonth = 1) => {
   if (match) {
     const month = MONTH_LOOKUP[match[2].toLowerCase()];
     return buildMonthInputValue(match[3], month);
+  }
+
+  match = normalizedText.match(/^(\d{4})\s+([A-Za-z]+)$/);
+
+  if (match) {
+    const month = MONTH_LOOKUP[match[2].toLowerCase()];
+    return buildMonthInputValue(match[1], month);
+  }
+
+  match = normalizedText.match(/^([A-Za-z]+)\s+\d{1,2}\s+(\d{4})$/);
+
+  if (match) {
+    const month = MONTH_LOOKUP[match[1].toLowerCase()];
+    return buildMonthInputValue(match[2], month);
   }
 
   return '';

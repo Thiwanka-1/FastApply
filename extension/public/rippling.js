@@ -3,7 +3,14 @@ console.log("[FastApply] Rippling Engine Active. (Fixed Scope Edition)");
 
 // --- RIPPLING BESPOKE COMBOBOX CLICKER ---
 const fillRipplingCombobox = (inputElement, targetValue) => {
-  if (!inputElement || !targetValue || inputElement.dataset.fa_dropdown_processing === "true" || inputElement.dataset.fa_filled === "true") return false;
+  if (
+    !inputElement ||
+    !targetValue ||
+    String(inputElement.value || "").trim() ||
+    inputElement.dataset.fa_dropdown_processing === "true" ||
+    inputElement.dataset.fa_filled === "true" ||
+    window.FastApplyUtils.isProtectedFromDeterministicFill?.(inputElement)
+  ) return false;
 
   inputElement.dataset.fa_dropdown_processing = "true";
   
@@ -26,26 +33,21 @@ const fillRipplingCombobox = (inputElement, targetValue) => {
       )
     );
     const normalizedTarget = String(targetValue).trim().toLowerCase();
-    let matchedOption = options.find(option => {
+    const exactOption = options.find(option => {
       return String(option.innerText || option.textContent)
         .trim()
         .toLowerCase() === normalizedTarget;
     });
-
-    if (!matchedOption) {
-      const semanticMatches = options.filter(option => {
-        return window.FastApplyUtils.smartMatch(
-          option.innerText || option.textContent,
-          targetValue
-        );
-      });
-
-      if (semanticMatches.length === 1) {
-        matchedOption = semanticMatches[0];
-      }
-    }
+    const matchedOption = exactOption || window.FastApplyUtils.findBestSemanticMatch?.(
+      options,
+      targetValue,
+      option => option.innerText || option.textContent || ""
+    );
 
     if (matchedOption) {
+      const matchedLabel = String(matchedOption.innerText || matchedOption.textContent)
+        .trim()
+        .toLowerCase();
       matchedOption.click();
 
       setTimeout(() => {
@@ -54,12 +56,16 @@ const fillRipplingCombobox = (inputElement, targetValue) => {
           .toLowerCase();
         const selectionConfirmed =
           inputElement.getAttribute("aria-expanded") === "false" ||
-          matchedOption.getAttribute("aria-selected") === "true" ||
-          !matchedOption.isConnected;
+          matchedOption.getAttribute("aria-selected") === "true";
 
-        if (selectedValue === normalizedTarget && selectionConfirmed) {
+        if (
+          (selectedValue === matchedLabel ||
+            window.FastApplyUtils.smartMatch?.(selectedValue, matchedLabel) === true) &&
+          selectionConfirmed
+        ) {
           inputElement.style.border = '2px solid #8b5cf6';
           inputElement.dataset.fa_filled = "true";
+          window.FastApplyUtils.setValueOwner?.(inputElement, "deterministic");
         }
 
         inputElement.dataset.fa_dropdown_processing = "false";
@@ -85,19 +91,17 @@ const fillRipplingRadios = (radioNodes, targetValue) => {
     let clicked = false;
 
     const radios = Array.from(radioNodes);
+    if (
+      radios.some(radio => radio.checked) ||
+      radios.some(radio => window.FastApplyUtils.isProtectedFromDeterministicFill?.(radio))
+    ) return false;
     const exactMatches = radios.filter(radio => {
         const wrapper = radio.closest('[data-testid^="radio-label-"]');
         const labelText = wrapper ? wrapper.innerText : (radio.parentElement.innerText || '');
         return labelText.trim().toLowerCase() === targetValue.trim().toLowerCase();
     });
 
-    const matches = exactMatches.length > 0
-      ? exactMatches
-      : radios.filter(radio => {
-          const wrapper = radio.closest('[data-testid^="radio-label-"]');
-          const labelText = wrapper ? wrapper.innerText : (radio.parentElement.innerText || '');
-          return window.FastApplyUtils.smartMatch(labelText, targetValue);
-        });
+    const matches = exactMatches;
 
     if (matches.length !== 1) return false;
 
@@ -107,7 +111,7 @@ const fillRipplingRadios = (radioNodes, targetValue) => {
         const wrapper = radio.closest('[data-testid^="radio-label-"]');
         const labelText = wrapper ? wrapper.innerText : (radio.parentElement.innerText || '');
 
-        if (window.FastApplyUtils.smartMatch(labelText, targetValue)) {
+        if (labelText.trim().toLowerCase() === targetValue.trim().toLowerCase()) {
             if (!radio.checked) radio.click();
             if (wrapper) {
                 wrapper.style.backgroundColor = '#f0fdfa';
@@ -118,7 +122,10 @@ const fillRipplingRadios = (radioNodes, targetValue) => {
         }
     });
 
-    if (clicked) radios.forEach(r => r.dataset.fa_filled = "true");
+    if (clicked) radios.forEach(r => {
+      r.dataset.fa_filled = "true";
+      window.FastApplyUtils.setValueOwner?.(r, "deterministic");
+    });
     return clicked;
 };
 
@@ -176,12 +183,19 @@ const handleRipplingCustoms = (profile) => {
       else if ((blockText.includes('hispanic') || blockText.includes('latino')) && combobox) {
           if (eeo.optOut) {
               if (fillRipplingCombobox(combobox, "decline")) filledAnything = true;
-          } else {
-              const isHisp = eeo.ethnicity && (eeo.ethnicity.toLowerCase().includes('hispanic') || eeo.ethnicity.toLowerCase().includes('latino'));
-              if (fillRipplingCombobox(combobox, isHisp ? "Yes" : "No")) filledAnything = true;
+          } else if (eeo.ethnicity) {
+              const ethnicity = eeo.ethnicity.toLowerCase();
+              const explicitlyNotHispanic = /\b(not|non)[\s-]+(hispanic|latino|latina|latinx)\b/.test(ethnicity);
+              const explicitlyHispanic = !explicitlyNotHispanic && /\b(hispanic|latino|latina|latinx)\b/.test(ethnicity);
+              if (explicitlyNotHispanic && fillRipplingCombobox(combobox, "No")) filledAnything = true;
+              else if (explicitlyHispanic && fillRipplingCombobox(combobox, "Yes")) filledAnything = true;
           }
       }
-      else if ((blockText.includes('race') || blockText.includes('ethnic')) && combobox) {
+      else if (blockText.includes('race') && combobox) {
+          const target = eeo.optOut ? "decline" : eeo.race;
+          if (fillRipplingCombobox(combobox, target)) filledAnything = true;
+      }
+      else if (blockText.includes('ethnic') && combobox) {
           const target = eeo.optOut ? "decline" : eeo.ethnicity;
           if (fillRipplingCombobox(combobox, target)) filledAnything = true;
       }
@@ -195,9 +209,6 @@ const handleRipplingCustoms = (profile) => {
       }
 
       // --- RADIOS ---
-      else if ((blockText.includes('consent') || blockText.includes('text message')) && radios.length > 0) {
-          if (fillRipplingRadios(radios, 'yes')) filledAnything = true;
-      }
       else if ((blockText.includes('authorized to work') || blockText.includes('right to work')) && radios.length > 0 && eeo.authorizedToWork) {
           if (fillRipplingRadios(radios, eeo.authorizedToWork)) filledAnything = true;
       }

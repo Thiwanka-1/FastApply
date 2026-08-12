@@ -149,6 +149,33 @@ const cleanText = (value) => {
   return typeof value === 'string' ? value.trim() : '';
 };
 
+const normalizeHttpUrl = value => {
+  const raw = cleanText(value);
+  if (!raw || /^(javascript|data|mailto):/i.test(raw)) return '';
+
+  try {
+    const candidate = /^https?:\/\//i.test(raw) ? raw : `https://${raw.replace(/^\/+/, '')}`;
+    const parsed = new URL(candidate);
+    if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname.includes('.')) {
+      return '';
+    }
+    return parsed.toString();
+  } catch (_) {
+    return '';
+  }
+};
+
+const cleanWebsitesAndSkills = data => {
+  const input = data && typeof data === 'object' ? data : {};
+  return {
+    linkedin: normalizeHttpUrl(input.linkedin),
+    github: normalizeHttpUrl(input.github),
+    twitter: normalizeHttpUrl(input.twitter),
+    portfolio: normalizeHttpUrl(input.portfolio),
+    skills: cleanStringArray(input.skills)
+  };
+};
+
 const cleanStringArray = (values) => {
   if (!Array.isArray(values)) return [];
 
@@ -283,13 +310,7 @@ const normalizeExtractedProfile = (data = {}) => {
       postalCode: cleanText(data.contactInfo?.postalCode)
     },
 
-    websitesAndSkills: {
-      linkedin: cleanText(data.websitesAndSkills?.linkedin),
-      github: cleanText(data.websitesAndSkills?.github),
-      twitter: cleanText(data.websitesAndSkills?.twitter),
-      portfolio: cleanText(data.websitesAndSkills?.portfolio),
-      skills: cleanStringArray(data.websitesAndSkills?.skills)
-    },
+    websitesAndSkills: cleanWebsitesAndSkills(data.websitesAndSkills),
 
     workHistory: cleanWorkHistory(data.workHistory),
     educationHistory: cleanEducationHistory(data.educationHistory),
@@ -1091,36 +1112,109 @@ const cleanFieldOptions = (options) => {
 
   return [...new Set(
     options
-      .map(option => typeof option === 'string' ? option.trim() : option?.label?.trim())
+      .map(option => {
+        if (typeof option === 'string') return option.trim();
+        return typeof option?.label === 'string' ? option.label.trim() : '';
+      })
+      .map(option => option?.slice(0, 1000))
       .filter(Boolean)
   )].slice(0, 250);
 };
 
-const normalizeApplicationFields = (fields) => {
+const normalizeApplicationCurrentValue = value => {
+  if (typeof value === 'string') return value.slice(0, 20000);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 100).map(item => {
+      if (typeof item === 'string') return item.slice(0, 2000);
+      if (typeof item === 'number' || typeof item === 'boolean') return item;
+      return '';
+    }).filter(item => item !== '');
+  }
+
+  return '';
+};
+
+const normalizeFieldValidity = validity => {
+  const input = validity && typeof validity === 'object'
+    ? validity
+    : {};
+
+  return {
+    valid: input.valid !== false && input.ariaInvalid !== true,
+    ariaInvalid: input.ariaInvalid === true,
+    message: cleanText(input.message).slice(0, 2000)
+  };
+};
+
+const normalizeApplicationFields = (fields, fallbackPageKey = '') => {
   if (!Array.isArray(fields)) return [];
 
   const usedIds = new Set();
 
-  return fields.slice(0, 100).map((field, index) => {
+  return fields.map((field, index) => {
     const item = typeof field === 'string' ? { label: field } : field;
     const label = cleanText(item?.label || item?.question);
     let fieldId = cleanText(item?.fieldId || item?.id || item?.name);
 
     if (!fieldId) fieldId = `field_${index + 1}`;
-    if (usedIds.has(fieldId)) fieldId = `${fieldId}_${index + 1}`;
+    fieldId = fieldId.slice(0, 180);
+
+    const baseFieldId = fieldId;
+    let duplicateIndex = 1;
+    while (usedIds.has(fieldId)) {
+      fieldId = `${baseFieldId}_${index + 1}_${duplicateIndex}`.slice(0, 200);
+      duplicateIndex += 1;
+    }
 
     usedIds.add(fieldId);
 
     return {
-      fieldId: fieldId.slice(0, 200),
+      fieldId,
       label: label.slice(0, 1000),
       type: cleanText(item?.type || 'text').slice(0, 50),
       required: item?.required === true,
       options: cleanFieldOptions(item?.options),
-      currentValue: item?.currentValue ?? '',
-      maxLength: Number.isFinite(Number(item?.maxLength)) ? Number(item.maxLength) : null
+      multiple: item?.multiple === true,
+      currentValue: normalizeApplicationCurrentValue(item?.currentValue),
+      maxLength: Number.isFinite(Number(item?.maxLength)) ? Number(item.maxLength) : null,
+      pageKey: cleanText(item?.pageKey || fallbackPageKey).slice(0, 500),
+      valueOwner: cleanText(item?.valueOwner).slice(0, 50),
+      validity: normalizeFieldValidity(item?.validity)
     };
   }).filter(field => field.label);
+};
+
+const toPlainApplicationItem = item => {
+  if (!item) return null;
+
+  return typeof item.toObject === 'function'
+    ? item.toObject()
+    : { ...item };
+};
+
+const mergeApplicationItemsByFieldId = (
+  existingItems,
+  incomingItems
+) => {
+  const merged = new Map();
+
+  (existingItems || []).forEach(item => {
+    const value = toPlainApplicationItem(item);
+    const fieldId = cleanText(value?.fieldId);
+
+    if (fieldId) merged.set(fieldId, value);
+  });
+
+  (incomingItems || []).forEach(item => {
+    const value = toPlainApplicationItem(item);
+    const fieldId = cleanText(value?.fieldId);
+
+    if (fieldId) merged.set(fieldId, value);
+  });
+
+  return [...merged.values()];
 };
 
 const normalizeJobContext = (body) => {
@@ -1567,6 +1661,378 @@ const documentContainsQuote = (documentText, quote) => {
     normalizedDocument.includes(normalizedQuote);
 };
 
+const classifyAnswerPolarity = value => {
+  const normalized = normalizeComparable(value);
+  if (!normalized) return '';
+
+  if (
+    normalized === 'false' ||
+    /^no\b/.test(normalized) ||
+    /\b(do not|does not|did not|will not|not agree|not authorized|not willing|not a|not protected)\b/.test(normalized)
+  ) {
+    return 'no';
+  }
+
+  if (
+    normalized === 'true' ||
+    /^yes\b/.test(normalized) ||
+    /\b(i am a|am a|identify as a|identify as one or more) protected veteran\b/.test(normalized) ||
+    /\bprotected veteran\b/.test(normalized) ||
+    /\b(agree|accept|acknowledge|certify|consent)\b/.test(normalized)
+  ) {
+    return 'yes';
+  }
+
+  return '';
+};
+
+const normalizeHttpComparable = value => {
+  const raw = cleanText(value);
+  if (!raw) return '';
+
+  try {
+    const candidate = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    const parsed = new URL(candidate);
+    return `${parsed.hostname.toLowerCase()}${parsed.pathname.replace(/\/$/, '')}`;
+  } catch (_) {
+    return '';
+  }
+};
+
+const canonicalGender = value => {
+  const normalized = normalizeComparable(value);
+  if (/^(male|man|cis male|cisgender male)\b/.test(normalized)) return 'male';
+  if (/^(female|woman|cis female|cisgender female)\b/.test(normalized)) return 'female';
+  if (/\b(nonbinary|non binary|genderqueer|gender fluid|genderfluid)\b/.test(normalized)) {
+    return 'nonbinary';
+  }
+  return '';
+};
+
+const canonicalCountry = value => {
+  const normalized = normalizeComparable(value)
+    .replace(/\s*\+?\d+\s*$/, '')
+    .trim();
+  if (/^(us|usa|u s|united states|united states of america)$/.test(normalized)) {
+    return 'united states';
+  }
+  if (/^(uk|u k|great britain|england|united kingdom)$/.test(normalized)) {
+    return 'united kingdom';
+  }
+  if (/^(uae|u a e|united arab emirates)$/.test(normalized)) {
+    return 'united arab emirates';
+  }
+  return normalized;
+};
+
+const US_STATE_CANONICAL = new Map(Object.entries({
+  AL: 'alabama', AK: 'alaska', AZ: 'arizona', AR: 'arkansas', CA: 'california',
+  CO: 'colorado', CT: 'connecticut', DE: 'delaware', FL: 'florida', GA: 'georgia',
+  HI: 'hawaii', ID: 'idaho', IL: 'illinois', IN: 'indiana', IA: 'iowa', KS: 'kansas',
+  KY: 'kentucky', LA: 'louisiana', ME: 'maine', MD: 'maryland', MA: 'massachusetts',
+  MI: 'michigan', MN: 'minnesota', MS: 'mississippi', MO: 'missouri', MT: 'montana',
+  NE: 'nebraska', NV: 'nevada', NH: 'new hampshire', NJ: 'new jersey', NM: 'new mexico',
+  NY: 'new york', NC: 'north carolina', ND: 'north dakota', OH: 'ohio', OK: 'oklahoma',
+  OR: 'oregon', PA: 'pennsylvania', RI: 'rhode island', SC: 'south carolina',
+  SD: 'south dakota', TN: 'tennessee', TX: 'texas', UT: 'utah', VT: 'vermont',
+  VA: 'virginia', WA: 'washington', WV: 'west virginia', WI: 'wisconsin',
+  WY: 'wyoming', DC: 'district of columbia'
+}));
+
+const canonicalState = value => {
+  const raw = cleanText(value);
+  return US_STATE_CANONICAL.get(raw.toUpperCase()) || normalizeComparable(raw);
+};
+
+const canonicalApplicationDate = value => {
+  const raw = cleanText(value).toLowerCase();
+  if (!raw) return '';
+
+  let match = raw.match(/^(\d{4})[-/.](\d{1,2})(?:[-/.](\d{1,2}))?/);
+  if (match) {
+    const [, year, month, day] = match;
+    return `${year}-${month.padStart(2, '0')}${day ? `-${day.padStart(2, '0')}` : ''}`;
+  }
+
+  match = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  if (match) {
+    const [, month, day, year] = match;
+    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+  }
+
+  match = raw.match(/^(\d{1,2})[-/.](\d{4})$/);
+  if (match) {
+    const [, month, year] = match;
+    return `${year}-${month.padStart(2, '0')}`;
+  }
+
+  const monthNames = {
+    jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+    jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12'
+  };
+  match = raw.match(/^([a-z]{3,9})\s+(\d{4})$/);
+  if (match) {
+    const month = monthNames[match[1].slice(0, 3)];
+    if (month) return `${match[2]}-${month}`;
+  }
+
+  match = raw.match(/^\d{4}$/);
+  return match ? match[0] : '';
+};
+
+const canonicalDegree = value => {
+  const normalized = normalizeComparable(value);
+  if (!normalized) return '';
+  if (/\b(high school|secondary school|ged)\b/.test(normalized)) return 'high-school';
+  if (/\b(associate|associates|aa|as degree)\b/.test(normalized)) return 'associate';
+  if (/\b(bachelor|bachelors|baccalaureate|bsc|b s|bs|ba)\b/.test(normalized)) return 'bachelor';
+  if (/\b(master|masters|msc|m s|ms|ma|mba)\b/.test(normalized)) return 'master';
+  if (/\b(doctor|doctorate|doctoral|phd|ph d|juris doctor|jd|md)\b/.test(normalized)) return 'doctorate';
+  if (/\b(certificate|certification)\b/.test(normalized)) return 'certificate';
+  if (/\bdiploma\b/.test(normalized)) return 'diploma';
+  return '';
+};
+
+const hasTextNegation = value => {
+  return /\b(no|not|without|decline|prefer not|do not|dont)\b/.test(
+    normalizeComparable(value)
+  );
+};
+
+const canonicalRace = value => {
+  const normalized = normalizeComparable(value);
+  if (/\basian\b/.test(normalized)) return 'asian';
+  if (/\bblack\b|\bafrican american\b/.test(normalized)) return 'black';
+  if (/\bwhite\b|\bcaucasian\b/.test(normalized)) return 'white';
+  if (/\bamerican indian\b|\balaska native\b|\bindigenous\b/.test(normalized)) return 'indigenous';
+  if (/\bnative hawaiian\b|\bpacific islander\b/.test(normalized)) return 'pacific-islander';
+  if (/\btwo or more\b|\bmultiracial\b|\bmixed race\b/.test(normalized)) return 'multiracial';
+  return '';
+};
+
+const canonicalEthnicity = value => {
+  const normalized = normalizeComparable(value);
+  if (/\bnot hispanic\b|\bnot latino\b/.test(normalized)) return 'not-hispanic-latino';
+  if (/\bhispanic\b|\blatino\b|\blatina\b|\blatinx\b/.test(normalized)) {
+    return 'hispanic-latino';
+  }
+  return '';
+};
+
+const evidenceValueSupportsAnswer = ({
+  answerValue,
+  evidenceValue,
+  field,
+  evidenceKey = ''
+}) => {
+  if (!hasApplicationValue(answerValue) || !hasApplicationValue(evidenceValue)) {
+    return false;
+  }
+
+  if (
+    evidenceValue &&
+    typeof evidenceValue === 'object' &&
+    !Array.isArray(evidenceValue)
+  ) {
+    return false;
+  }
+
+  const answers = Array.isArray(answerValue) ? answerValue : [answerValue];
+  const evidenceValues = Array.isArray(evidenceValue) ? evidenceValue : [evidenceValue];
+  const normalizedEvidence = evidenceValues
+    .map(normalizeComparable)
+    .filter(Boolean);
+  const label = cleanText(field?.label).toLowerCase();
+
+  return answers.every(answerItem => {
+    const normalizedAnswer = normalizeComparable(answerItem);
+    if (!normalizedAnswer) return false;
+
+    if (normalizedEvidence.includes(normalizedAnswer)) return true;
+
+    if (
+      normalizedAnswer.length >= 4 &&
+      normalizedEvidence.some(item => {
+        return hasTextNegation(item) === hasTextNegation(normalizedAnswer) &&
+          item.includes(normalizedAnswer);
+      })
+    ) {
+      return true;
+    }
+
+    if (
+      /\b(phone|telephone|mobile)\b/.test(label) &&
+      !/\b(country|territory|dial|calling)\b/.test(label)
+    ) {
+      const answerDigits = String(answerItem).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+      return evidenceValues.some(item => {
+        const evidenceDigits = String(item).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+        return answerDigits.length >= 7 && answerDigits === evidenceDigits;
+      });
+    }
+
+    if (/\b(url|website|portfolio|linkedin|github|twitter)\b/.test(label)) {
+      const normalizedUrl = normalizeHttpComparable(answerItem);
+      return Boolean(normalizedUrl) && evidenceValues.some(item => {
+        return normalizeHttpComparable(item) === normalizedUrl;
+      });
+    }
+
+    if (/\bgender\b/.test(label)) {
+      const answerGender = canonicalGender(answerItem);
+      return Boolean(answerGender) && evidenceValues.some(item => {
+        return canonicalGender(item) === answerGender;
+      });
+    }
+
+    if (/\b(country|territory)\b/.test(label)) {
+      const answerCountry = canonicalCountry(answerItem);
+      return Boolean(answerCountry) && evidenceValues.some(item => {
+        return canonicalCountry(item) === answerCountry;
+      });
+    }
+
+    if (/\b(state|province|region)\b/.test(label)) {
+      const answerState = canonicalState(answerItem);
+      return Boolean(answerState) && evidenceValues.some(item => {
+        return canonicalState(item) === answerState;
+      });
+    }
+
+    if (/\bdegree\b/.test(label)) {
+      const answerDegree = canonicalDegree(answerItem);
+      return Boolean(answerDegree) && evidenceValues.some(item => {
+        return canonicalDegree(item) === answerDegree;
+      });
+    }
+
+    if (/\brace\b/.test(label)) {
+      const answerRace = canonicalRace(answerItem);
+      if (answerRace) {
+        return evidenceValues.some(item => {
+          return canonicalRace(item) === answerRace;
+        });
+      }
+    }
+
+    if (/\b(ethnicity|hispanic|latino)\b/.test(label)) {
+      const answerEthnicity = canonicalEthnicity(answerItem);
+      return Boolean(answerEthnicity) && evidenceValues.some(item => {
+        return canonicalEthnicity(item) === answerEthnicity;
+      });
+    }
+
+    const answerPolarity = classifyAnswerPolarity(answerItem);
+    const evidencePolarities = evidenceValues.map(classifyAnswerPolarity).filter(Boolean);
+    if (answerPolarity && evidencePolarities.includes(answerPolarity)) return true;
+
+    if (
+      normalizeMemoryKey(evidenceKey).endsWith('optout') &&
+      evidenceValue === true &&
+      /\b(prefer not|decline|do not wish|dont wish|choose not)\b/.test(normalizedAnswer)
+    ) {
+      return true;
+    }
+
+    if (/\b(date|from|to|start|end|graduat)\b/.test(label)) {
+      const answerDate = canonicalApplicationDate(answerItem);
+      return Boolean(answerDate) && evidenceValues.some(item => {
+        const evidenceDate = canonicalApplicationDate(item);
+        if (!evidenceDate) return false;
+        if (answerDate === evidenceDate) return true;
+        return answerDate.length === 4
+          ? evidenceDate.startsWith(answerDate)
+          : evidenceDate.length === 4 && answerDate.startsWith(evidenceDate);
+      });
+    }
+
+    return false;
+  });
+};
+
+const PROFILE_EVIDENCE_LABEL_RULES = [
+  [/personalinfo\.firstname$/i, /\b(first|given) name\b/i],
+  [/personalinfo\.lastname$/i, /\b(last|family|surname) name\b/i],
+  [/personalinfo\.preferredname$/i, /\bpreferred name\b/i],
+  [/personalinfo\.pronouns$/i, /\bpronouns?\b/i],
+  [/contactinfo\.email$/i, /\bemail\b/i],
+  [/contactinfo\.phone$/i, /\b(phone|telephone|mobile)\b/i],
+  [/contactinfo\.addressline1$/i, /\baddress( line)? 1\b/i],
+  [/contactinfo\.addressline2$/i, /\baddress( line)? 2\b/i],
+  [/contactinfo\.city$/i, /\bcity\b/i],
+  [/contactinfo\.state$/i, /\b(state|province|region)\b/i],
+  [/contactinfo\.postalcode$/i, /\b(postal|zip)\b/i],
+  [/contactinfo\.country$/i, /\b(country|territory)\b/i],
+  [/websitesandskills\.linkedin$/i, /\blinkedin\b/i],
+  [/websitesandskills\.github$/i, /\bgithub\b/i],
+  [/websitesandskills\.(portfolio|twitter|facebook)$/i, /\b(portfolio|twitter|facebook|website|url)\b/i],
+  [/websitesandskills\.skills$/i, /\bskills?\b/i],
+  [/workhistory\.\d+\.jobtitle$/i, /\b(job|position|role) title\b/i],
+  [/workhistory\.\d+\.company$/i, /\b(company|employer)\b/i],
+  [/workhistory\.\d+\.location$/i, /\b(location|city|country)\b/i],
+  [/workhistory\.\d+\.employmenttype$/i, /\bemployment type\b/i],
+  [/workhistory\.\d+\.description$/i, /\b(description|responsibilit|duties|experience)\b/i],
+  [/workhistory\.\d+\.startdate$/i, /\b(from|start)\b/i],
+  [/workhistory\.\d+\.enddate$/i, /\b(to|end)\b/i],
+  [/workhistory\.\d+\.currentlyworkhere$/i, /\b(current|currently work)\b/i],
+  [/educationhistory\.\d+\.school$/i, /\b(school|university|institution)\b/i],
+  [/educationhistory\.\d+\.degree$/i, /\bdegree\b/i],
+  [/educationhistory\.\d+\.(major|minor)$/i, /\b(major|minor|field|area) of study\b/i],
+  [/educationhistory\.\d+\.institutionlocation$/i, /\b(school|institution|education).*\blocation\b/i],
+  [/educationhistory\.\d+\.gpa(scale)?$/i, /\b(gpa|grade point)\b/i],
+  [/educationhistory\.\d+\.startdate$/i, /\b(from|start)\b/i],
+  [/educationhistory\.\d+\.enddate$/i, /\b(to|end|graduat)\b/i],
+  [/eeo\.authorizedtowork$/i, /\bauthori[sz]ed to work\b/i],
+  [/eeo\.requirevisanow$/i, /\b(now|currently).*\b(visa|sponsor|immigration)|\b(visa|sponsor|immigration).*\b(now|currently)\b/i],
+  [/eeo\.requirevisafuture$/i, /\b(future|will).*\b(visa|sponsor|immigration)|\b(visa|sponsor|immigration).*\b(future|will)\b/i],
+  [/eeo\.gender$/i, /\bgender\b/i],
+  [/eeo\.(ethnicity|race)$/i, /\b(ethnicity|race|hispanic)\b/i],
+  [/eeo\.veteran$/i, /\bveteran\b/i],
+  [/eeo\.disability$/i, /\bdisab/i],
+  [/eeo\.age$/i, /\bage\b/i],
+  [/eeo\.optout$/i, /\b(gender|ethnicity|race|veteran|disab)\b/i]
+];
+
+const isProfileEvidenceRelevant = (evidenceKey, field) => {
+  const cleanKey = cleanText(evidenceKey).replace(/^profile\./i, '');
+  const rule = PROFILE_EVIDENCE_LABEL_RULES.find(([keyPattern]) => {
+    return keyPattern.test(cleanKey);
+  });
+  return Boolean(rule && rule[1].test(cleanText(field?.label)));
+};
+
+const isApplicationMemoryRelevant = (entry, field) => {
+  const label = normalizeComparable(field?.label);
+  if (!label || !entry) return false;
+
+  const phrases = [
+    entry.question,
+    ...(Array.isArray(entry.aliases) ? entry.aliases : []),
+    camelCaseToWords(entry.key || '')
+  ].map(normalizeComparable).filter(phrase => phrase.length >= 5);
+
+  if (phrases.some(phrase => label.includes(phrase) || phrase.includes(label))) {
+    return true;
+  }
+
+  const key = normalizeMemoryKey(entry.key);
+  const conceptRules = [
+    [/authorizedtowork/, /\bauthori[sz]ed to work\b/],
+    [/sponsorship|workauthorizationdetails/, /\b(sponsor|visa|immigration|work permit)\b/],
+    [/salary|compensation/, /\b(salary|compensation|pay)\b/],
+    [/willingtorelocate/, /\brelocat/],
+    [/travel/, /\btravel\b/],
+    [/governmentemployment/, /\bgovernment.*\b(employee|employment)|\b(employee|employment).*\bgovernment\b/],
+    [/employmentagreement/, /\b(non compete|non solicitation|restrictive covenant)\b/],
+    [/criminalhistory/, /\b(criminal|conviction|felony|misdemeanor)\b/],
+    [/interviewavailability/, /\binterview.*\b(availab|schedule)|\b(availab|schedule).*\binterview\b/],
+    [/dateofbirth/, /\b(date of birth|birth date|birthday|dob)\b/],
+    [/nationality|citizenship|residency/, /\b(nationality|citizen|residen)\b/]
+  ];
+  const rule = conceptRules.find(([keyPattern]) => keyPattern.test(key));
+  return Boolean(rule && rule[1].test(label));
+};
+
 const validateAgentEvidence = ({
   answer,
   field,
@@ -1582,7 +2048,31 @@ const validateAgentEvidence = ({
       evidenceKey
     );
 
-    return hasApplicationValue(evidenceValue);
+    const fieldLabel = normalizeComparable(field?.label);
+    const isFullNameField = /\b(full name|legal name|your name)\b/.test(fieldLabel);
+    const profileName = [
+      candidateContext.profile?.personalInfo?.firstName,
+      candidateContext.profile?.personalInfo?.lastName
+    ].map(cleanText).filter(Boolean).join(' ');
+
+    if (
+      isFullNameField &&
+      profileName &&
+      normalizeComparable(answer?.value) === normalizeComparable(profileName) &&
+      /^personalInfo\.(firstName|lastName)$/i.test(
+        evidenceKey.replace(/^profile\./i, '')
+      )
+    ) {
+      return true;
+    }
+
+    return isProfileEvidenceRelevant(evidenceKey, field) &&
+      evidenceValueSupportsAnswer({
+        answerValue: answer?.value,
+        evidenceValue,
+        field,
+        evidenceKey
+      });
   }
 
   if (source === 'applicationMemory') {
@@ -1591,27 +2081,60 @@ const validateAgentEvidence = ({
       evidenceKey
     );
 
-    return hasApplicationValue(memoryEntry?.answer);
+    return isApplicationMemoryRelevant(memoryEntry, field) &&
+      evidenceValueSupportsAnswer({
+        answerValue: answer?.value,
+        evidenceValue: memoryEntry?.answer,
+        field,
+        evidenceKey
+      });
   }
 
   if (source === 'resume') {
-    return documentContainsQuote(
+    const quoteExists = documentContainsQuote(
       candidateContext.documents?.resume?.rawText,
       evidenceQuote
+    );
+    return quoteExists && (
+      isNarrativeApplicationField(field) ||
+      evidenceValueSupportsAnswer({
+        answerValue: answer?.value,
+        evidenceValue: evidenceQuote,
+        field,
+        evidenceKey
+      })
     );
   }
 
   if (source === 'cqfo') {
-    return documentContainsQuote(
+    const quoteExists = documentContainsQuote(
       candidateContext.documents?.cqfo?.rawText,
       evidenceQuote
+    );
+    return quoteExists && (
+      isNarrativeApplicationField(field) ||
+      evidenceValueSupportsAnswer({
+        answerValue: answer?.value,
+        evidenceValue: evidenceQuote,
+        field,
+        evidenceKey
+      })
     );
   }
 
   if (source === 'coverLetter') {
-    return documentContainsQuote(
+    const quoteExists = documentContainsQuote(
       candidateContext.documents?.coverLetter?.rawText,
       evidenceQuote
+    );
+    return quoteExists && (
+      isNarrativeApplicationField(field) ||
+      evidenceValueSupportsAnswer({
+        answerValue: answer?.value,
+        evidenceValue: evidenceQuote,
+        field,
+        evidenceKey
+      })
     );
   }
 
@@ -1622,53 +2145,177 @@ const validateAgentEvidence = ({
   return false;
 };
 
-const getApplicationOptionPolarity = value => {
-  const normalized = normalizeComparable(value);
+const APPLICATION_OPTION_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'for', 'of', 'or', 'the', 'to'
+]);
 
-  if (!normalized) return '';
+const normalizeApplicationOptionMeaning = value => {
+  let normalized = String(value ?? '')
+    .toLowerCase()
+    .replace(/\.net\b/g, ' dotnet ')
+    .replace(/\bc\s*#/g, ' csharp ')
+    .replace(/\bf\s*#/g, ' fsharp ');
 
-  if (
-    /\bnot a veteran\b|\bhave not served\b|\bnot protected veteran\b|\bdo not\b|\bdont\b|^no\b|^false$/.test(
-      normalized
-    )
-  ) {
-    return 'no';
-  }
+  normalized = normalizeComparable(normalized)
+    .replace(/\bnode\s+js\b/g, 'nodejs')
+    .replace(/\breact\s+js\b/g, 'react')
+    .replace(/\bvue\s+js\b/g, 'vue')
+    .replace(/\bangular\s+js\b/g, 'angular')
+    .replace(/\bnext\s+js\b/g, 'nextjs')
+    .replace(/\bms sql server\b/g, 'microsoft sql server')
+    .replace(/\bamazon web services\b/g, 'aws')
+    .replace(/\bgoogle cloud platform\b/g, 'gcp')
+    .replace(/\bk8s\b/g, 'kubernetes')
+    .replace(/\bstructured query language\b/g, 'sql')
+    .replace(/\bservice organization controls?\s*2\b/g, 'soc2')
+    .replace(/\bsoc\s*2\b/g, 'soc2')
+    .replace(/\bunited states of america\b/g, 'united states')
+    .replace(/\brequest for quotation\b|\brfq\b/g, 'request quotation')
+    .replace(/\brequest for proposal\b|\brfp\b/g, 'request proposal')
+    .replace(/\brequest for information\b|\brfi\b/g, 'request information')
+    .replace(/\b(programming|query|markup|scripting) language\b/g, ' ')
+    .replace(/\b(software skill|framework|library|platform|technology|methodology|standard|protocol|tool)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  if (
-    /^yes\b|^true$|\bi am a veteran\b|\bprotected veteran\b/.test(
-      normalized
-    )
-  ) {
-    return 'yes';
-  }
-
-  return '';
-};
-
-const getApplicationOptionWords = value => {
-  const stopWords = new Set([
-    'a', 'an', 'the', 'i', 'am', 'as', 'of', 'to', 'in',
-    'and', 'or', 'have', 'has', 'my'
+  const wholeAliases = new Map([
+    ['js', 'javascript'],
+    ['ts', 'typescript'],
+    ['us', 'united states'],
+    ['u s', 'united states'],
+    ['usa', 'united states'],
+    ['uk', 'united kingdom'],
+    ['u k', 'united kingdom'],
+    ['b e', 'bachelor engineering'],
+    ['be', 'bachelor engineering'],
+    ['beng', 'bachelor engineering'],
+    ['b sc', 'bachelor science'],
+    ['bs', 'bachelor science'],
+    ['bsc', 'bachelor science'],
+    ['b a', 'bachelor arts'],
+    ['ba', 'bachelor arts'],
+    ['m sc', 'master science'],
+    ['ms', 'master science'],
+    ['msc', 'master science'],
+    ['m a', 'master arts'],
+    ['ma', 'master arts'],
+    ['mba', 'master business administration'],
+    ['ph d', 'doctor philosophy'],
+    ['phd', 'doctor philosophy']
   ]);
 
-  return new Set(
-    normalizeComparable(value)
-      .split(' ')
-      .filter(word => word.length > 1 && !stopWords.has(word))
-  );
+  return wholeAliases.get(normalized) || normalized;
 };
 
-const countApplicationOptionOverlap = (first, second) => {
-  const firstWords = getApplicationOptionWords(first);
-  const secondWords = getApplicationOptionWords(second);
-  let overlap = 0;
+const applicationOptionTokens = value => {
+  return normalizeApplicationOptionMeaning(value)
+    .split(/\s+/)
+    .filter(token => token && !APPLICATION_OPTION_STOP_WORDS.has(token));
+};
 
-  firstWords.forEach(word => {
-    if (secondWords.has(word)) overlap += 1;
-  });
+const isGenericDegreeOption = value => {
+  const ignored = new Set([
+    'degree', 'degrees', 'bachelor', 'bachelors', 'master', 'masters',
+    'doctor', 'doctorate', 'doctoral', 'associate', 'associates',
+    'certificate', 'certification', 'diploma', 's'
+  ]);
+  return applicationOptionTokens(value).filter(token => !ignored.has(token)).length === 0;
+};
 
-  return overlap;
+const scoreApplicationOptionMeaning = (option, value) => {
+  const optionText = normalizeApplicationOptionMeaning(option);
+  const valueText = normalizeApplicationOptionMeaning(value);
+  if (!optionText || !valueText) return 0;
+  if (normalizeComparable(option) === normalizeComparable(value)) return 1;
+  if (optionText === valueText) return 0.99;
+
+  const optionPolarity = classifyAnswerPolarity(option);
+  const valuePolarity = classifyAnswerPolarity(value);
+  if (optionPolarity || valuePolarity) {
+    return optionPolarity && optionPolarity === valuePolarity ? 0.98 : 0;
+  }
+
+  const parentheticalAliases = input => Array.from(
+    String(input ?? '').matchAll(/\(([^)]+)\)/g),
+    match => normalizeApplicationOptionMeaning(match[1])
+  ).filter(Boolean);
+  const optionAliases = parentheticalAliases(option);
+  const valueAliases = parentheticalAliases(value);
+  if (
+    optionAliases.includes(valueText) ||
+    valueAliases.includes(optionText) ||
+    optionAliases.some(alias => valueAliases.includes(alias))
+  ) return 0.98;
+
+  const optionGender = canonicalGender(option);
+  const valueGender = canonicalGender(value);
+  if (optionGender || valueGender) {
+    return optionGender && optionGender === valueGender ? 0.98 : 0;
+  }
+
+  const optionRace = canonicalRace(option);
+  const valueRace = canonicalRace(value);
+  if (optionRace || valueRace) {
+    return optionRace && optionRace === valueRace &&
+      hasTextNegation(option) === hasTextNegation(value) ? 0.97 : 0;
+  }
+
+  const optionEthnicity = canonicalEthnicity(option);
+  const valueEthnicity = canonicalEthnicity(value);
+  if (optionEthnicity || valueEthnicity) {
+    return optionEthnicity && optionEthnicity === valueEthnicity ? 0.97 : 0;
+  }
+
+  const optionCountry = canonicalCountry(option);
+  const valueCountry = canonicalCountry(value);
+  if (
+    optionCountry && valueCountry &&
+    optionCountry === valueCountry &&
+    (
+      optionCountry !== normalizeComparable(option) ||
+      valueCountry !== normalizeComparable(value)
+    )
+  ) return 0.97;
+
+  const optionDegree = canonicalDegree(option);
+  const valueDegree = canonicalDegree(value);
+  if (optionDegree || valueDegree) {
+    if (!optionDegree || optionDegree !== valueDegree) return 0;
+    if (isGenericDegreeOption(option) || isGenericDegreeOption(value)) return 0.86;
+  }
+
+  const optionTokens = [...new Set(applicationOptionTokens(optionText))];
+  const valueTokens = [...new Set(applicationOptionTokens(valueText))];
+  if (!optionTokens.length || !valueTokens.length) return 0;
+
+  if (valueTokens.length === 1 && optionTokens.length > 1) {
+    const acronym = optionTokens.map(token => token[0]).join('');
+    if (valueTokens[0].length >= 2 && valueTokens[0] === acronym) return 0.96;
+  }
+  if (optionTokens.length === 1 && valueTokens.length > 1) {
+    const acronym = valueTokens.map(token => token[0]).join('');
+    if (optionTokens[0].length >= 2 && optionTokens[0] === acronym) return 0.96;
+  }
+
+  const intersection = valueTokens.filter(token => optionTokens.includes(token)).length;
+  if (!intersection) return 0;
+  if (intersection === 1 && Math.max(valueTokens.length, optionTokens.length) > 2) {
+    return 0;
+  }
+
+  const valueCoverage = intersection / valueTokens.length;
+  const optionCoverage = intersection / optionTokens.length;
+  const dice = (2 * intersection) / (valueTokens.length + optionTokens.length);
+  if (
+    intersection === valueTokens.length &&
+    intersection === optionTokens.length
+  ) return 0.98;
+  if (intersection >= 2 && (valueCoverage === 1 || optionCoverage === 1)) {
+    return 0.88;
+  }
+  return (0.55 * Math.min(valueCoverage, optionCoverage)) +
+    (0.3 * Math.max(valueCoverage, optionCoverage)) +
+    (0.15 * dice);
 };
 
 const matchSingleApplicationOption = (value, options) => {
@@ -1686,67 +2333,32 @@ const matchSingleApplicationOption = (value, options) => {
 
   if (exactMatch !== undefined) return exactMatch;
 
-  const wantsDecline =
-    /\bdecline\b|\bprefer not\b|\bdont wish\b|\bdo not wish\b|\bchoose not\b/.test(
-      normalizedValue
-    );
-
-  if (wantsDecline) {
-    const declineOptions = options.filter(option => {
-      return /\bdecline\b|\bprefer not\b|\bdont wish\b|\bdo not wish\b|\bchoose not\b/.test(
-        normalizeComparable(option)
-      );
-    });
-
-    if (declineOptions.length === 1) return declineOptions[0];
-  }
-
-  const polarity = getApplicationOptionPolarity(value);
-
-  if (polarity) {
-    const polarityOptions = options.filter(option => {
-      return getApplicationOptionPolarity(option) === polarity;
-    });
-
-    if (polarityOptions.length === 1) return polarityOptions[0];
-  }
-
-  const containedMatches = options.filter(option => {
-    const normalizedOption = normalizeComparable(option);
-
-    return normalizedOption.includes(normalizedValue) ||
-      normalizedValue.includes(normalizedOption);
-  });
-
-  if (containedMatches.length === 1) return containedMatches[0];
-
-  const scoredOptions = options
+  const ranked = options
     .map(option => ({
       option,
-      score: countApplicationOptionOverlap(value, option)
+      score: scoreApplicationOptionMeaning(option, value)
     }))
-    .filter(item => item.score > 0)
+    .filter(candidate => candidate.score >= 0.74)
     .sort((first, second) => second.score - first.score);
 
-  if (scoredOptions.length === 0) return '';
-
-  if (
-    scoredOptions[1] &&
-    scoredOptions[1].score === scoredOptions[0].score
-  ) {
+  if (!ranked.length) return '';
+  if (ranked.length > 1 && ranked[0].score - ranked[1].score < 0.06) {
     return '';
   }
 
-  return scoredOptions[0].option;
+  return ranked[0].option;
+
 };
 
 const matchApplicationOption = (value, options) => {
   if (Array.isArray(value)) {
-    return [...new Set(
-      value
-        .map(item => matchSingleApplicationOption(item, options))
-        .filter(Boolean)
-    )];
+    const matches = value.map(item => {
+      return matchSingleApplicationOption(item, options);
+    });
+
+    if (matches.some(match => !match)) return [];
+
+    return [...new Set(matches)];
   }
 
   return matchSingleApplicationOption(value, options);
@@ -1935,6 +2547,112 @@ const inferJobCountry = jobContext => {
   return '';
 };
 
+const applyStructuredAnswerFallbacks = ({
+  answers,
+  fields,
+  profileData,
+  jobContext
+}) => {
+  const fieldMap = new Map(fields.map(field => [field.fieldId, field]));
+  const memory = profileData.applicationMemory?.answers || [];
+  const profile = profileData || {};
+  const personal = profile.personalInfo || {};
+  const contact = profile.contactInfo || {};
+  const websites = profile.websitesAndSkills || {};
+  const eeo = profile.eeo || {};
+
+  const memoryValue = key => getApplicationMemoryValue(memory, key);
+  const jobCountry = inferJobCountry(jobContext);
+
+  const resolveValue = field => {
+    const label = normalizeComparable(field.label);
+
+    if (/\bpreferred (first|given) name\b/.test(label)) return personal.preferredName;
+    if (/\b(first|given) name\b/.test(label) && !/preferred/.test(label)) {
+      return personal.firstName;
+    }
+    if (/\b(last|family|surname) name\b/.test(label)) return personal.lastName;
+    if (/\bemail( address)?\b/.test(label)) return contact.email;
+    if (/\bphone (number|mobile)\b|\btelephone\b/.test(label) && !/extension|code/.test(label)) {
+      return contact.phone;
+    }
+    if (/\baddress line 1\b|\bstreet address\b/.test(label)) return contact.addressLine1;
+    if (/\baddress line 2\b|\bapartment\b|\baddress 2\b/.test(label)) {
+      return contact.addressLine2;
+    }
+    if (/^city\b|\bmunicipality\b/.test(label)) return contact.city;
+    if (/^(state|province|state province|region)\b/.test(label)) return contact.state;
+    if (/\b(postal|zip) code\b/.test(label)) return contact.postalCode;
+    if (/^(country|country territory)\b/.test(label) && !/phone|code/.test(label)) {
+      return contact.country;
+    }
+    if (/\blinkedin\b/.test(label)) return websites.linkedin;
+    if (/\bgithub\b/.test(label)) return websites.github;
+    if (/\bportfolio\b|\bpersonal website\b/.test(label)) return websites.portfolio;
+
+    if (/\brelocat(e|ing|ion)\b/.test(label)) {
+      return memoryValue('willingToRelocate');
+    }
+    if (/\bnon compete\b|\bnon solicitation\b/.test(label)) {
+      return memoryValue('employmentAgreement');
+    }
+    if (/\bgovernment\b/.test(label) && /\b(employee|employment|worked)\b/.test(label)) {
+      return memoryValue('governmentEmployment');
+    }
+    if (/\bauthorized to work\b/.test(label)) {
+      if (jobCountry === 'Canada' || /\bcanada\b/.test(label)) {
+        return memoryValue('authorizedToWorkCanada');
+      }
+      if (jobCountry === 'United States' || /\b(united states|usa|u s)\b/.test(label)) {
+        return memoryValue('authorizedToWorkUSA') || eeo.authorizedToWork;
+      }
+
+      const usa = memoryValue('authorizedToWorkUSA');
+      const canada = memoryValue('authorizedToWorkCanada');
+      if (usa && !canada) return usa;
+      if (canada && !usa) return canada;
+      if (normalizeComparable(usa) === normalizeComparable(canada)) return usa;
+      return '';
+    }
+    if (/\bsponsorship\b|\bimmigration filing\b/.test(label)) {
+      const stored = memoryValue('sponsorshipRequired');
+      if (stored) return stored;
+      const now = cleanText(eeo.requireVisaNow);
+      const future = cleanText(eeo.requireVisaFuture);
+      if (/^yes$/i.test(now) || /^yes$/i.test(future)) return 'Yes';
+      if (/^no$/i.test(now) && /^no$/i.test(future)) return 'No';
+    }
+
+    return '';
+  };
+
+  return answers.map(answer => {
+    if (hasApplicationValue(answer.value)) return answer;
+    const field = fieldMap.get(answer.fieldId);
+    if (!field) return answer;
+
+    let value = cleanText(resolveValue(field));
+    if (!value) return answer;
+
+    if (['select', 'radio', 'checkbox'].includes(field.type)) {
+      value = matchApplicationOption(value, field.options);
+      if (!hasApplicationValue(value)) return answer;
+    }
+
+    value = truncateApplicationAnswer(value, field.maxLength);
+    if (!hasApplicationValue(value)) return answer;
+
+    return {
+      ...answer,
+      value,
+      source: 'profile',
+      confidence: 1,
+      requiresReview: false,
+      reviewReason: ''
+    };
+  });
+};
+
 const applyAnswerReviewRules = ({
   answers,
   fields,
@@ -2036,9 +2754,29 @@ export const updateProfile = async (req, res, next) => {
 
     const updatePayload = {};
 
+    if (
+      Object.prototype.hasOwnProperty.call(req.body, 'websitesAndSkills') &&
+      req.body.websitesAndSkills &&
+      typeof req.body.websitesAndSkills === 'object'
+    ) {
+      const invalidLinkFields = ['linkedin', 'github', 'twitter', 'portfolio']
+        .filter(key => {
+          const raw = cleanText(req.body.websitesAndSkills[key]);
+          return raw && !normalizeHttpUrl(raw);
+        });
+
+      if (invalidLinkFields.length > 0) {
+        return res.status(400).json({
+          message: `Invalid website URL: ${invalidLinkFields.join(', ')}. Use a valid HTTP or HTTPS address.`
+        });
+      }
+    }
+
     allowedSections.forEach(section => {
       if (Object.prototype.hasOwnProperty.call(req.body, section)) {
-        updatePayload[section] = req.body[section];
+        updatePayload[section] = section === 'websitesAndSkills'
+          ? cleanWebsitesAndSkills(req.body[section])
+          : req.body[section];
       }
     });
 
@@ -2336,7 +3074,7 @@ export const parseDocumentsAndPopulateProfile = async (req, res, next) => {
   }
 };
 
-// @desc    Answer unresolved application fields
+// @desc    Audit and answer supported application fields
 // @route   POST /api/profile/answer-questions
 export const answerApplicationQuestions = async (req, res, next) => {
   const startedAt = Date.now();
@@ -2355,12 +3093,20 @@ export const answerApplicationQuestions = async (req, res, next) => {
       incomingFields = req.body.unansweredQuestions;
     }
 
-    const fields = normalizeApplicationFields(incomingFields)
-      .filter(field => !hasApplicationValue(field.currentValue));
+    if (Array.isArray(incomingFields) && incomingFields.length > 300) {
+      return res.status(400).json({
+        message: 'A maximum of 300 application fields may be audited per request.'
+      });
+    }
+
+    const fields = normalizeApplicationFields(
+      incomingFields,
+      cleanText(req.body.pageKey || req.body.pageIdentity)
+    );
 
     if (fields.length === 0) {
       return res.status(400).json({
-        message: 'No unresolved application fields were provided.'
+        message: 'No supported application fields were provided.'
       });
     }
 
@@ -2396,7 +3142,10 @@ export const answerApplicationQuestions = async (req, res, next) => {
       }
 
       application.jobContext = jobContext;
-      application.fields = fields;
+      application.fields = mergeApplicationItemsByFieldId(
+        application.fields,
+        fields
+      );
       application.status = 'analysing';
       application.errorMessage = '';
       await application.save();
@@ -2458,11 +3207,25 @@ export const answerApplicationQuestions = async (req, res, next) => {
       fields
     }).length;
 
-    const result = await generateFormAnswers({
-      candidateContext,
-      jobContext,
-      fields
-    });
+    const fieldBatches = [];
+    for (let index = 0; index < fields.length; index += 35) {
+      fieldBatches.push(fields.slice(index, index + 35));
+    }
+
+    const generatedAnswers = [];
+    for (const fieldBatch of fieldBatches) {
+      const batchResult = await generateFormAnswers({
+        candidateContext,
+        jobContext,
+        fields: fieldBatch
+      });
+
+      if (Array.isArray(batchResult?.answers)) {
+        generatedAnswers.push(...batchResult.answers);
+      }
+    }
+
+    const result = { answers: generatedAnswers };
 
     let answers = normalizeGeneratedAnswers(
       result,
@@ -2478,22 +3241,46 @@ export const answerApplicationQuestions = async (req, res, next) => {
         profileData.applicationMemory?.answers || []
     });
 
+    answers = applyStructuredAnswerFallbacks({
+      answers,
+      fields,
+      profileData,
+      jobContext
+    });
+
     const aiFilled = answers.filter(answer => {
       return hasApplicationValue(answer.value);
     }).length;
 
     const unresolved = answers.length - aiFilled;
 
-    application.answers = answers;
+    application.answers = mergeApplicationItemsByFieldId(
+      application.answers,
+      answers
+    );
     application.status = 'ready_for_review';
     application.errorMessage = '';
 
+    const cumulativeAnswered = application.answers.filter(answer => {
+      return hasApplicationValue(answer.value);
+    }).length;
+
+    const cumulativeUnresolved = application.answers.length -
+      cumulativeAnswered;
+
+    const cumulativeScriptFilled = application.fields.filter(field => {
+      return field.valueOwner === 'deterministic' &&
+        hasApplicationValue(field.currentValue);
+    }).length;
+
     application.stats = {
-      totalFields: Number(req.body.scriptStats?.totalFields) ||
-        fields.length,
-      scriptFilled: Number(req.body.scriptStats?.scriptFilled) || 0,
-      aiFilled,
-      unresolved
+      totalFields: application.fields.length,
+      scriptFilled: Math.max(
+        cumulativeScriptFilled,
+        Number(req.body.scriptStats?.scriptFilled) || 0
+      ),
+      aiFilled: cumulativeAnswered,
+      unresolved: cumulativeUnresolved
     };
 
     await application.save();

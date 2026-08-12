@@ -14,6 +14,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
   let latestScan = null;
   let currentApplicationId = "";
   let agent2InFlight = false;
+  let scanInFlight = false;
   const semanticAgentFields = new Map();
 
   const delay = milliseconds => {
@@ -136,10 +137,21 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
   };
 
   const buildPageIdentity = jobContext => {
+    let pageUrl = window.location.href;
+
+    if (configuration?.atsPlatform === "workday") {
+      try {
+        const url = new URL(window.location.href);
+        pageUrl = `${url.origin}${url.pathname}`;
+      } catch (_) {}
+    }
+
     return JSON.stringify({
-      url: window.location.href,
+      url: pageUrl,
       company: cleanText(jobContext?.company).toLowerCase(),
-      jobTitle: cleanText(jobContext?.jobTitle).toLowerCase()
+      jobTitle: configuration?.atsPlatform === "workday"
+        ? ""
+        : cleanText(jobContext?.jobTitle).toLowerCase()
     });
   };
 
@@ -198,6 +210,21 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
   };
 
   const waitForDeterministicDropdowns = async () => {
+    // Workday performs at most two bounded passes for a newly rendered wizard
+    // step. Let both settle before taking the immutable Agent 2 snapshot so the
+    // audit cannot race with row creation, lookup selection, or skill chips.
+    if (configuration?.atsPlatform === "workday") {
+      for (let pass = 0; pass < 3; pass += 1) {
+        const queue = window.WorkdayEngine?.deterministicQueue;
+        if (queue && typeof queue.then === "function") {
+          try {
+            await queue;
+          } catch (_) {}
+        }
+        await delay(550);
+      }
+    }
+
     for (let attempt = 0; attempt < 20; attempt += 1) {
       const pending = U.queryAgentElements(
         document,
@@ -215,6 +242,49 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       .replace(/[â€™']/g, "")
       .replace(/[^a-z0-9]+/g, " ")
       .trim();
+  };
+
+  const hasFieldValue = value => {
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === "boolean") return true;
+    return cleanText(value).length > 0;
+  };
+
+  const comparableValue = value => {
+    if (Array.isArray(value)) {
+      return JSON.stringify(
+        value.map(item => normalizeText(item)).filter(Boolean).sort()
+      );
+    }
+
+    if (typeof value === "boolean") return String(value);
+    return normalizeText(value);
+  };
+
+  const semanticValuesMatch = (currentValue, targetValue) => {
+    if (Array.isArray(targetValue)) {
+      const currentItems = Array.isArray(currentValue)
+        ? currentValue
+        : cleanText(currentValue).split(/\s*,\s*/).filter(Boolean);
+      return comparableValue(currentItems) === comparableValue(targetValue);
+    }
+
+    return comparableValue(currentValue) === comparableValue(targetValue);
+  };
+
+  const hasCommittedSearchSelection = field => {
+    if (!field?.control || !field?.wrapper) return false;
+    if (field.control.dataset.fa_filled === "true") return true;
+    return Boolean(field.wrapper.querySelector([
+      '[data-automation-id^="selectedItem"]',
+      '[data-automation-id*="selected" i]',
+      '[class*="singleValue"]',
+      '[class*="single-value"]',
+      '[class*="multiValue"]',
+      '[class*="multi-value"]',
+      '[data-testid*="selected"]',
+      'button[aria-label^="Remove " i]'
+    ].join(",")));
   };
 
   const hashText = value => {
@@ -269,6 +339,11 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
   };
 
   const getSemanticCurrentValue = (control, wrapper) => {
+    const isPlaceholderValue = value => {
+      return /^(select|select one|choose|choose one|please select|none selected|one)$/i.test(
+        cleanText(value)
+      );
+    };
     const selectedText = Array.from(
       wrapper?.querySelectorAll?.(
         [
@@ -277,18 +352,31 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
           '[class*="single-value"]',
           '[class*="multiValue"]',
           '[class*="multi-value"]',
-          '[data-testid*="selected"]'
+          '[data-testid*="selected"]',
+          '[data-automation-id^="selectedItem"]',
+          '[data-automation-id*="selected" i]',
+          'button[aria-label^="Remove " i]'
         ].join(",")
       ) || []
     )
-      .map(element => cleanText(element.innerText || element.textContent))
+      .map(element => {
+        const ariaLabel = cleanText(element.getAttribute?.("aria-label"));
+        const value = /^remove\s+/i.test(ariaLabel)
+          ? ariaLabel.replace(/^remove\s+/i, "")
+          : cleanText(element.innerText || element.textContent);
+        return value
+          .replace(/^\s*(remove|delete)\s+/i, "")
+          .replace(/\s+(remove|delete)\s*$/i, "")
+          .trim();
+      })
       .filter(Boolean)
       .join(", ");
 
-    if (selectedText) return selectedText;
+    if (selectedText && !isPlaceholderValue(selectedText)) return selectedText;
 
     if (control?.tagName === "INPUT") {
-      return cleanText(control.value);
+      const inputValue = cleanText(control.value);
+      return isPlaceholderValue(inputValue) ? "" : inputValue;
     }
 
     const controlText = cleanText(
@@ -296,16 +384,24 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
     );
     const label = getSemanticLabel(control, wrapper);
 
-    return controlText
+    const cleaned = controlText
       .replace(label, "")
-      .replace(/\b(select|choose)\b\s*\.{0,3}/gi, "")
+      .replace(/^\s*(select|choose)\s*\.{0,3}\s*$/gi, "")
       .trim();
+
+    return isPlaceholderValue(cleaned)
+      ? ""
+      : cleaned;
   };
 
   const openSemanticDropdown = control => {
     if (!control) return;
 
     if (control.getAttribute("aria-expanded") !== "true") {
+      if (configuration?.atsPlatform === "workday" &&
+        window.WorkdayEngine?.clickElement?.(control)) {
+        return;
+      }
       control.dispatchEvent(
         new MouseEvent("mousedown", {
           bubbles: true,
@@ -339,12 +435,37 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       if (listbox) return listbox;
     }
 
+    if (control?.id) {
+      try {
+        const associated = document.querySelector(
+          `[data-associated-widget="${CSS.escape(control.id)}"]`
+        );
+        if (associated && isVisible(associated)) return associated;
+      } catch (_) {}
+    }
+
     const visibleListboxes = U.queryAgentElements(
       document,
-      '[role="listbox"], [id*="-listbox"], [class*="menu-list"]'
+      [
+        '[data-automation-activepopup="true"]',
+        '[data-automation-id="selectWidget-SuggestionPopup"]',
+        '[role="listbox"]',
+        '[id*="-listbox"]',
+        '[class*="menu-list"]'
+      ].join(",")
     ).filter(isVisible);
 
     return visibleListboxes[visibleListboxes.length - 1] || null;
+  };
+
+  const waitForSemanticListbox = async (control, timeout = 2500) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeout) {
+      const listbox = getSemanticListbox(control);
+      if (listbox && isVisible(listbox)) return listbox;
+      await delay(80);
+    }
+    return null;
   };
 
   const getSemanticOptions = listbox => {
@@ -352,8 +473,18 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
 
     return U.queryAgentElements(
       listbox,
-      '[role="option"], [id*="-option"], [class*="-option"]'
-    ).filter(isVisible);
+      [
+        '[role="option"]',
+        '[data-automation-id="promptOption"]',
+        '[data-automation-id="multiSelectOption"]',
+        '[data-automation-id="menuItem"]',
+        '[id*="-option"]',
+        '[class*="-option"]'
+      ].join(",")
+    ).filter(option => {
+      return isVisible(option) &&
+        !option.closest('[data-automation-id^="selectedItem"]');
+    });
   };
 
   const getSemanticScrollContainer = listbox => {
@@ -462,7 +593,8 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         'input[role="combobox"]',
         'input[aria-haspopup="listbox"]',
         '[role="combobox"]',
-        '[aria-haspopup="listbox"]'
+        '[aria-haspopup="listbox"]',
+        '[data-automation-id="selectWidget"]'
       ].join(",")
     ).filter(control => {
       return isVisible(control) &&
@@ -482,36 +614,55 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
   const collectSemanticFields = async () => {
     semanticAgentFields.clear();
     const fields = [];
-    const seen = new Set();
+    const seenControls = new Set();
 
-    for (const control of getSemanticControls()) {
+    const controls = getSemanticControls();
+    for (let controlIndex = 0; controlIndex < controls.length; controlIndex += 1) {
+      const control = controls[controlIndex];
+      if (seenControls.has(control)) continue;
+      seenControls.add(control);
       const wrapper = getSemanticWrapper(control);
       const label = getSemanticLabel(control, wrapper);
+      const currentValue = getSemanticCurrentValue(control, wrapper);
 
-      control.dataset.fa_agent_processed = "true";
-
-      if (!wrapper || !label || getSemanticCurrentValue(control, wrapper)) {
+      if (!wrapper || !label) {
         continue;
       }
 
-      const identity = `${normalizeText(label)}|select`;
-      if (seen.has(identity)) continue;
+      if (
+        configuration?.atsPlatform === "workday" &&
+        (
+          control.closest('[data-automation-id="formField-skills"]') ||
+          /\b(type to add|add) skills?\b/i.test(label)
+        )
+      ) {
+        continue;
+      }
 
       openSemanticDropdown(control);
-      await delay(180);
-
-      const listbox = getSemanticListbox(control);
+      const listbox = await waitForSemanticListbox(control);
       const options = await collectSemanticOptions(listbox);
       closeSemanticDropdown(control);
-      await delay(60);
+      await delay(160);
 
-      if (options.length === 0) continue;
+      const searchable = control.tagName === "INPUT" && Boolean(
+        control.matches(
+          '[role="combobox"], [aria-haspopup="listbox"], [data-automation-id="searchBox"]'
+        )
+      );
+      const isPromptSearch = configuration?.atsPlatform === "workday" &&
+        control.getAttribute("data-automation-id") === "searchBox";
+      const useSearchAdapter = searchable && (options.length === 0 || isPromptSearch);
+      const fieldOptions = useSearchAdapter ? [] : options;
+
+      if (fieldOptions.length === 0 && !useSearchAdapter) continue;
 
       const fieldId = `fa_semantic_select_${hashText([
-        window.location.pathname,
+        configuration?.getPageKey?.() || window.location.pathname,
         control.id || "",
         control.getAttribute("name") || "",
-        label
+        label,
+        controlIndex
       ].join("|"))}`;
 
       const multiple =
@@ -522,23 +673,34 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         control,
         wrapper,
         label,
-        options,
-        multiple
+        options: fieldOptions,
+        multiple,
+        currentValue,
+        valueOwner: U.getValueOwner?.(control) || "",
+        searchable: useSearchAdapter
       });
 
       fields.push({
         fieldId,
         label,
-        type: "select",
+        type: fieldOptions.length > 0 ? "select" : "autocomplete",
         required:
           control.required === true ||
           control.getAttribute("aria-required") === "true" ||
           label.includes("*"),
-        options,
-        currentValue: "",
-        maxLength: null
+        options: fieldOptions,
+        multiple,
+        currentValue,
+        maxLength: null,
+        valueOwner: U.getValueOwner?.(control) || "",
+        validity: {
+          valid:
+            control.getAttribute("aria-invalid") !== "true" &&
+            (typeof control.checkValidity !== "function" || control.checkValidity()),
+          ariaInvalid: control.getAttribute("aria-invalid") === "true",
+          message: cleanText(control.validationMessage || "")
+        }
       });
-      seen.add(identity);
     }
 
     return fields;
@@ -546,48 +708,38 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
 
   const collectDefaultFields = async () => {
     const semanticFields = await collectSemanticFields();
-    const semanticLabels = new Set(
-      semanticFields.map(field => normalizeText(field.label))
-    );
-
-    const standardFields = U.collectUnresolvedFields().filter(field => {
-      return !semanticLabels.has(normalizeText(field.label));
-    });
+    const standardFields = U.collectAuditableFields();
 
     const unique = new Map();
 
     [...standardFields, ...semanticFields].forEach(field => {
-      const key = `${normalizeText(field.label)}|${field.type}`;
-      const existing = unique.get(key);
-
-      if (
-        !existing ||
-        field.fieldId.startsWith("fa_semantic_select_")
-      ) {
-        unique.set(key, field);
-      }
+      unique.set(field.fieldId, field);
     });
 
     return [...unique.values()];
   };
 
-  const findSemanticOption = async (field, target) => {
+  const findSemanticOption = async (field, target, settings = {}) => {
     openSemanticDropdown(field.control);
-    await delay(180);
-
-    const listbox = getSemanticListbox(field.control);
+    const listbox = await waitForSemanticListbox(field.control);
     const scrollContainer = getSemanticScrollContainer(listbox);
-    const normalizedTarget = normalizeText(target);
-
     const findRendered = () => {
-      return getSemanticOptions(listbox).find(option => {
+      const options = getSemanticOptions(listbox);
+      return U.findBestSemanticMatch?.(
+        options,
+        target,
+        option => option.innerText || option.textContent || ""
+      ) || options.find(option => {
         return normalizeText(option.innerText || option.textContent) ===
-          normalizedTarget;
+          normalizeText(target);
       }) || null;
     };
 
     let match = findRendered();
-    if (match || !scrollContainer) return match;
+    const firstRendered = getSemanticOptions(listbox)[0] || null;
+    if (match || !scrollContainer) {
+      return match || (settings.selectTopResult === true ? firstRendered : null);
+    }
 
     scrollContainer.scrollTop = 0;
     scrollContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
@@ -618,7 +770,8 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       await delay(60);
     }
 
-    return findRendered();
+    return findRendered() ||
+      (settings.selectTopResult === true ? firstRendered : null);
   };
 
   const markSemanticState = (field, state, reason = "") => {
@@ -634,19 +787,324 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         : "2px solid #06b6d4";
   };
 
+  const setSemanticSearchValue = (control, value) => {
+    const target = String(value ?? "");
+    if (!control || control.tagName !== "INPUT") return false;
+
+    if (window.WorkdayEngine?.typeInputValue) {
+      return window.WorkdayEngine.typeInputValue(control, target);
+    }
+
+    try {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value"
+      )?.set;
+      control.focus();
+      if (setter) setter.call(control, target);
+      else control.value = target;
+      control.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        data: target,
+        inputType: "insertText"
+      }));
+      control.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const refreshSemanticFieldNodes = field => {
+    if (field.control?.isConnected && field.wrapper?.isConnected) return true;
+
+    let control = null;
+    if (field.control?.id) {
+      control = document.getElementById(field.control.id);
+    }
+
+    if (!control && field.control?.getAttribute?.("name")) {
+      try {
+        control = document.querySelector(
+          `[name="${CSS.escape(field.control.getAttribute("name"))}"]`
+        );
+      } catch (_) {}
+    }
+
+    if (!control) {
+      control = getSemanticControls().find(candidate => {
+        return normalizeText(getSemanticLabel(candidate, getSemanticWrapper(candidate))) ===
+          normalizeText(field.label);
+      });
+    }
+
+    if (!control) return false;
+    field.control = control;
+    field.wrapper = getSemanticWrapper(control);
+    return Boolean(field.wrapper);
+  };
+
+  const clickSemanticOption = async (option, control = null) => {
+    if (!option) return false;
+
+    try {
+      if (
+        configuration?.atsPlatform === "workday" &&
+        window.WorkdayEngine?.selectWorkdayOption
+      ) {
+        return Boolean(await window.WorkdayEngine.selectWorkdayOption(
+          option,
+          null,
+          { control }
+        ));
+      }
+      option.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+      if (typeof PointerEvent === "function") {
+        option.dispatchEvent(new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          pointerType: "mouse",
+          isPrimary: true
+        }));
+      }
+      option.dispatchEvent(new MouseEvent("mousedown", {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      }));
+      option.dispatchEvent(new MouseEvent("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      }));
+      if (typeof PointerEvent === "function") {
+        option.dispatchEvent(new PointerEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          pointerType: "mouse",
+          isPrimary: true
+        }));
+      }
+      option.click();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const applySearchableSemanticAnswer = async (answer, field) => {
+    const target = cleanText(
+      Array.isArray(answer.value) ? answer.value[0] : answer.value
+    );
+    const liveBefore = getSemanticCurrentValue(field.control, field.wrapper);
+
+    if (!target) {
+      answer.action = "unresolved";
+      answer.requiresReview = true;
+      answer.reviewReason = answer.reviewReason ||
+        "No supported answer was available for this searchable field.";
+      markSemanticState(field, "unresolved", answer.reviewReason);
+      return { filled: false, unresolved: true };
+    }
+
+    if (!semanticValuesMatch(liveBefore, field.currentValue)) {
+      answer.action = "conflict";
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "The field changed after the scan, so FastApply preserved the newer value.";
+      markSemanticState(field, "review", answer.reviewReason);
+      return { filled: false, unresolved: true, conflict: true };
+    }
+
+    if (
+      semanticValuesMatch(liveBefore, target) &&
+      (
+        configuration?.atsPlatform !== "workday" ||
+        hasCommittedSearchSelection(field)
+      )
+    ) {
+      answer.action = "keep";
+      field.control.dataset.fa_agent_validated = "true";
+      markSemanticState(field, answer.requiresReview ? "review" : "filled");
+      return { filled: true, unresolved: false, kept: true };
+    }
+
+    if (hasFieldValue(liveBefore) && field.valueOwner === "user") {
+      answer.action = "conflict";
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "FastApply preserved the manually entered searchable value.";
+      markSemanticState(field, "review", answer.reviewReason);
+      return { filled: false, unresolved: true, conflict: true };
+    }
+
+    if (hasFieldValue(liveBefore)) {
+      const removeButtons = U.queryAgentElements(
+        field.wrapper,
+        [
+          'button[aria-label^="Remove " i]',
+          '[data-automation-id^="selectedItem"] button',
+          '[data-automation-id^="selectedItem"][role="button"]'
+        ].join(",")
+      ).filter(isVisible);
+      removeButtons.forEach(button => button.click());
+      await delay(180);
+      if (!refreshSemanticFieldNodes(field)) {
+        answer.value = "";
+        answer.requiresReview = true;
+        answer.reviewReason =
+          "The searchable control was replaced before the correction could be applied.";
+        markSemanticState(field, "unresolved", answer.reviewReason);
+        return { filled: false, unresolved: true };
+      }
+    }
+
+    openSemanticDropdown(field.control);
+    if (!setSemanticSearchValue(field.control, target)) {
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason = "The searchable field would not accept input.";
+      markSemanticState(field, "unresolved", answer.reviewReason);
+      return { filled: false, unresolved: true };
+    }
+
+    const normalizedLabel = normalizeText(field.label);
+    const isSchoolLookup = /\b(school|university|institution)\b/.test(normalizedLabel);
+    const isFieldOfStudyLookup = /\b(field of study|area of study|major)\b/.test(
+      normalizedLabel
+    );
+
+    if (configuration?.atsPlatform === "workday" && isSchoolLookup) {
+      await delay(120);
+      window.WorkdayEngine?.triggerWorkdayLookupEnter?.(field.control);
+    }
+
+    await delay(250);
+    const option = await findSemanticOption(field, target, {
+      selectTopResult:
+        configuration?.atsPlatform === "workday" &&
+        (isSchoolLookup || isFieldOfStudyLookup)
+    });
+    const selectedOptionLabel = cleanText(option?.innerText || option?.textContent || "");
+    if (!option || !selectedOptionLabel || !await clickSemanticOption(option, field.control)) {
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "No unambiguous selectable option represented the supported answer.";
+      closeSemanticDropdown(field.control);
+      markSemanticState(field, "unresolved", answer.reviewReason);
+      return { filled: false, unresolved: true };
+    }
+
+    await delay(350);
+    if (!refreshSemanticFieldNodes(field)) {
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "The searchable control was replaced before its selection could be verified.";
+      markSemanticState(field, "unresolved", answer.reviewReason);
+      return { filled: false, unresolved: true };
+    }
+    const selected = getSemanticCurrentValue(field.control, field.wrapper);
+    const retained = (
+      semanticValuesMatch(selected, selectedOptionLabel) ||
+      U.smartMatch?.(selected, selectedOptionLabel) === true
+    ) && (
+      hasCommittedSearchSelection(field) ||
+      field.control.getAttribute("aria-expanded") !== "true"
+    );
+    if (!retained) {
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "The page did not confirm the selected searchable option.";
+      markSemanticState(field, "unresolved", answer.reviewReason);
+      return { filled: false, unresolved: true };
+    }
+
+    answer.action = hasFieldValue(liveBefore) ? "replace" : "fill";
+    answer.value = selectedOptionLabel;
+    field.control.dataset.fa_filled = "true";
+    field.control.dataset.fa_agent_filled = "true";
+    U.setValueOwner?.(field.control, "agent");
+    markSemanticState(
+      field,
+      answer.requiresReview ? "review" : "filled",
+      answer.reviewReason || ""
+    );
+    return { filled: true, unresolved: false, kept: false };
+  };
+
   const applySemanticAnswer = async (answer, field) => {
+    if (!refreshSemanticFieldNodes(field)) {
+      answer.action = "unresolved";
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "The field was replaced or removed after the page audit.";
+      markSemanticState(field, "unresolved", answer.reviewReason);
+      return { filled: false, unresolved: true };
+    }
+
+    field.valueOwner = U.getValueOwner?.(field.control) || field.valueOwner;
+
     const incomingValues = Array.isArray(answer.value)
       ? answer.value
       : [answer.value];
+
+    if (!incomingValues.some(hasFieldValue)) {
+      const liveValue = getSemanticCurrentValue(field.control, field.wrapper);
+      if (!semanticValuesMatch(liveValue, field.currentValue)) {
+        answer.action = "conflict";
+        answer.value = "";
+        answer.requiresReview = true;
+        answer.reviewReason =
+          "The field changed after the audit, so FastApply preserved the newer value.";
+        markSemanticState(field, "review", answer.reviewReason);
+        return { filled: false, unresolved: true, conflict: true };
+      }
+
+      const isValid = field.control.getAttribute("aria-invalid") !== "true" &&
+        (typeof field.control.checkValidity !== "function" || field.control.checkValidity());
+      if (field.valueOwner === "user" && hasFieldValue(liveValue) && isValid) {
+        answer.action = "keep";
+        answer.value = liveValue;
+        answer.source = "user";
+        answer.confidence = 1;
+        answer.requiresReview = false;
+        answer.reviewReason = "";
+        field.control.dataset.fa_agent_validated = "true";
+        markSemanticState(field, "filled");
+        return { filled: true, unresolved: false, kept: true };
+      }
+
+      answer.action = "unresolved";
+      answer.requiresReview = true;
+      answer.reviewReason = answer.reviewReason ||
+        "No supported answer was available for this field.";
+      markSemanticState(field, "unresolved", answer.reviewReason);
+      return {
+        filled: false,
+        unresolved: true
+      };
+    }
+
+    if (field.searchable && field.options.length === 0) {
+      return applySearchableSemanticAnswer(answer, field);
+    }
 
     const exactValues = incomingValues.map(value => {
       return field.options.find(option => {
         return normalizeText(option) === normalizeText(value);
       });
     }).filter(Boolean);
+    const requestedValues = incomingValues.filter(hasFieldValue);
 
     if (
       exactValues.length === 0 ||
+      exactValues.length !== requestedValues.length ||
       (!field.multiple && exactValues.length !== 1)
     ) {
       answer.value = "";
@@ -654,12 +1112,68 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       answer.reviewReason =
         "The answer did not exactly match an available dropdown option.";
       markSemanticState(field, "unresolved", answer.reviewReason);
-      return false;
+      return {
+        filled: false,
+        unresolved: true
+      };
     }
 
     const valuesToApply = field.multiple
       ? [...new Set(exactValues)]
       : [exactValues[0]];
+
+    const targetValue = field.multiple
+      ? valuesToApply
+      : valuesToApply[0];
+    const liveBefore = getSemanticCurrentValue(field.control, field.wrapper);
+
+    if (!semanticValuesMatch(liveBefore, field.currentValue)) {
+      answer.action = "conflict";
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "The field changed after the scan, so FastApply preserved the newer value.";
+      markSemanticState(field, "review", answer.reviewReason);
+      return {
+        filled: false,
+        unresolved: true,
+        conflict: true
+      };
+    }
+
+    if (semanticValuesMatch(liveBefore, targetValue)) {
+      answer.action = "keep";
+      field.control.dataset.fa_agent_validated = "true";
+      markSemanticState(
+        field,
+        answer.requiresReview ? "review" : "filled",
+        answer.reviewReason || ""
+      );
+      return {
+        filled: true,
+        unresolved: false,
+        kept: true
+      };
+    }
+
+    if (
+      hasFieldValue(liveBefore) &&
+      field.valueOwner === "user"
+    ) {
+      answer.action = "conflict";
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "FastApply found a different answer but preserved the manually entered value.";
+      markSemanticState(field, "review", answer.reviewReason);
+      return {
+        filled: false,
+        unresolved: true,
+        conflict: true
+      };
+    }
+
+    answer.action = hasFieldValue(liveBefore) ? "replace" : "fill";
 
     for (const target of valuesToApply) {
       const option = await findSemanticOption(field, target);
@@ -671,50 +1185,67 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
           "The exact option exists, but it could not be rendered for selection.";
         closeSemanticDropdown(field.control);
         markSemanticState(field, "unresolved", answer.reviewReason);
-        return false;
+        return {
+          filled: false,
+          unresolved: true
+        };
       }
 
-      option.dispatchEvent(
-        new MouseEvent("mousedown", {
-          bubbles: true,
-          cancelable: true,
-          view: window
-        })
-      );
-      option.dispatchEvent(
-        new MouseEvent("mouseup", {
-          bubbles: true,
-          cancelable: true,
-          view: window
-        })
-      );
-      option.click();
-      await delay(160);
+      if (!await clickSemanticOption(option, field.control)) {
+        answer.value = "";
+        answer.requiresReview = true;
+        answer.reviewReason = "The exact option could not be clicked.";
+        markSemanticState(field, "unresolved", answer.reviewReason);
+        return { filled: false, unresolved: true };
+      }
 
-      const selected = getSemanticCurrentValue(
-        field.control,
-        field.wrapper
-      );
+      const expectedSoFar = field.multiple
+        ? valuesToApply.slice(0, valuesToApply.indexOf(target) + 1)
+        : target;
 
-      if (!normalizeText(selected).includes(normalizeText(target))) {
+      let confirmed = false;
+      for (let attempt = 0; attempt < 18; attempt += 1) {
+        await delay(100);
+        if (!refreshSemanticFieldNodes(field)) continue;
+        const selected = getSemanticCurrentValue(field.control, field.wrapper);
+        if (semanticValuesMatch(selected, expectedSoFar)) {
+          confirmed = true;
+          break;
+        }
+      }
+
+      if (!confirmed) {
         answer.value = "";
         answer.requiresReview = true;
         answer.reviewReason =
           "The page did not confirm the selected dropdown option.";
         markSemanticState(field, "unresolved", answer.reviewReason);
-        return false;
+        return {
+          filled: false,
+          unresolved: true
+        };
+      }
+
+      if (!field.multiple) {
+        closeSemanticDropdown(field.control);
+        await delay(100);
       }
     }
 
-    answer.value = field.multiple ? valuesToApply : valuesToApply[0];
+    answer.value = targetValue;
     field.control.dataset.fa_agent_filled = "true";
     field.control.dataset.fa_filled = "true";
+    U.setValueOwner?.(field.control, "agent");
     markSemanticState(
       field,
       answer.requiresReview ? "review" : "filled",
       answer.reviewReason || ""
     );
-    return true;
+    return {
+      filled: true,
+      unresolved: false,
+      kept: false
+    };
   };
 
   const applyDefaultAnswers = async answers => {
@@ -722,7 +1253,10 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
     const summary = {
       answered: 0,
       reviewRequired: 0,
-      unresolved: 0
+      unresolved: 0,
+      kept: 0,
+      corrected: 0,
+      conflicts: 0
     };
 
     for (const answer of answers) {
@@ -733,23 +1267,31 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         continue;
       }
 
-      const filled = await applySemanticAnswer(answer, field);
+      const result = await applySemanticAnswer(answer, field);
 
-      if (filled) summary.answered += 1;
-      else summary.unresolved += 1;
+      if (result.filled) summary.answered += 1;
+      if (result.unresolved) summary.unresolved += 1;
+      if (result.kept) summary.kept += 1;
+      if (result.filled && answer?.action === "replace") {
+        summary.corrected += 1;
+      }
+      if (result.conflict) summary.conflicts += 1;
 
-      if (filled && answer.requiresReview) {
+      if (result.filled && answer.requiresReview) {
         summary.reviewRequired += 1;
       }
     }
 
-    const standardSummary = U.applyAgentAnswers(standardAnswers);
+    const standardSummary = await U.applyAgentAnswers(standardAnswers);
 
     return {
       answered: summary.answered + standardSummary.answered,
       reviewRequired:
         summary.reviewRequired + standardSummary.reviewRequired,
-      unresolved: summary.unresolved + standardSummary.unresolved
+      unresolved: summary.unresolved + standardSummary.unresolved,
+      kept: summary.kept + (standardSummary.kept || 0),
+      corrected: summary.corrected + (standardSummary.corrected || 0),
+      conflicts: summary.conflicts + (standardSummary.conflicts || 0)
     };
   };
 
@@ -792,7 +1334,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
     return extractDefaultJobContext();
   };
 
-  const scanPage = async () => {
+  const scanPage = async (options = {}) => {
     if (!configuration) {
       return {
         success: false,
@@ -801,13 +1343,29 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       };
     }
 
+    if (agent2InFlight && options.internal !== true) {
+      return {
+        success: false,
+        error: "Agent 2 is currently auditing this page."
+      };
+    }
+
+    if (scanInFlight) {
+      return {
+        success: false,
+        error: "A page inspection is already in progress."
+      };
+    }
+
+    scanInFlight = true;
+
     try {
       const profile = await getProfile();
 
       if (
-        typeof configuration.runDeterministic === "function"
+        typeof configuration.prepareScan === "function"
       ) {
-        await configuration.runDeterministic(profile);
+        await configuration.prepareScan(profile);
       }
 
       await waitForDeterministicDropdowns();
@@ -818,6 +1376,10 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       const jobContext = getJobContext();
       const pageIdentity =
         buildPageIdentity(jobContext);
+      const pageKey = cleanText(
+        configuration.getPageKey?.() ||
+        window.location.pathname
+      );
 
       if (
         latestScan &&
@@ -829,20 +1391,35 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       const fields = await collectFields();
       const scriptFilled =
         countDeterministicFields();
+      const repairOnlyFields = fields.filter(field => field?.repairOnly === true);
+      const auditableFields = fields.filter(field => field?.repairOnly !== true);
+      const emptyFields = auditableFields.filter(field => {
+        return !hasFieldValue(field?.currentValue);
+      });
+      const invalidFields = auditableFields.filter(field => {
+        return field?.validity?.valid === false;
+      });
+      const attentionFields = auditableFields.filter(field => {
+        return !hasFieldValue(field?.currentValue) ||
+          field?.validity?.valid === false;
+      });
 
       latestScan = {
         scanId: `scan_${Date.now()}`,
         pageIdentity,
+        pageKey,
         pageUrl: window.location.href,
         pageTitle: cleanText(document.title),
         atsPlatform:
           configuration.atsPlatform ||
           "generic",
         jobContext,
-        totalFields:
-          scriptFilled + fields.length,
+        totalFields: auditableFields.length,
         scriptFilled,
-        missingFields: fields.length,
+        auditableFields: auditableFields.length,
+        missingFields: emptyFields.length + repairOnlyFields.length,
+        invalidFields: invalidFields.length,
+        structuralIssues: repairOnlyFields.length,
         fields,
         scannedAt: new Date().toISOString()
       };
@@ -861,12 +1438,10 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         totalFields:
           latestScan.totalFields,
         scriptFilled,
-        requestedFields:
-          fields.length,
+        requestedFields: auditableFields.length,
         answered: 0,
         reviewRequired: 0,
-        unresolved:
-          fields.length,
+        unresolved: attentionFields.length + repairOnlyFields.length,
         error: "",
         updatedAt:
           new Date().toISOString()
@@ -874,6 +1449,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
 
       await writeStorage({
         lastPageScan: latestScan,
+        lastAgent2Result: null,
         agent2RunState: runState
       });
 
@@ -900,6 +1476,8 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         success: false,
         error: errorMessage
       };
+    } finally {
+      scanInFlight = false;
     }
   };
 
@@ -911,14 +1489,27 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       };
     }
 
+    agent2InFlight = true;
+
     /*
      * Always perform a fresh scan first. This is important
      * for Greenhouse and other single-page application sites
      * where the URL or form can change without a full reload.
      */
-    let scanResponse = await scanPage();
+    let scanResponse;
+
+    try {
+      scanResponse = await scanPage({ internal: true });
+    } catch (error) {
+      agent2InFlight = false;
+      return {
+        success: false,
+        error: error?.message || "The page audit failed."
+      };
+    }
 
     if (!scanResponse.success) {
+      agent2InFlight = false;
       return scanResponse;
     }
 
@@ -929,11 +1520,20 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       repairOnlyFields.length > 0 &&
       typeof configuration?.repairFields === "function"
     ) {
-      await configuration.repairFields(repairOnlyFields);
+      try {
+        await configuration.repairFields(repairOnlyFields);
+      } catch (error) {
+        agent2InFlight = false;
+        return {
+          success: false,
+          error: error?.message || "The page structure could not be prepared."
+        };
+      }
       await delay(250);
-      scanResponse = await scanPage();
+      scanResponse = await scanPage({ internal: true });
 
       if (!scanResponse.success) {
+        agent2InFlight = false;
         return scanResponse;
       }
 
@@ -971,12 +1571,15 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       };
 
       await writeStorage({
+        lastAgent2Result: null,
         lastAgent2Summary: summary,
         agent2RunState: {
           ...summary,
           error: ""
         }
       });
+
+      agent2InFlight = false;
 
       return {
         success: true,
@@ -987,8 +1590,6 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         }
       };
     }
-
-    agent2InFlight = true;
 
     const startedAt =
       new Date().toISOString();
@@ -1032,6 +1633,10 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
           : {}),
         atsPlatform:
           scan.atsPlatform,
+        pageKey:
+          scan.pageKey,
+        pageIdentity:
+          scan.pageIdentity,
         jobContext:
           scan.jobContext,
         scriptStats: {
@@ -1054,7 +1659,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       if (!response?.success) {
         throw new Error(
           response?.error ||
-          "Agent 2 could not analyse the missing fields."
+          "Agent 2 could not audit the application fields."
         );
       }
 
@@ -1062,17 +1667,116 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         response.data?.applicationId ||
         currentApplicationId;
 
-      const appliedSummary =
-        await applyAnswers(
-          response.data?.answers || []
+      const livePageKey = cleanText(
+        configuration.getPageKey?.() || window.location.pathname
+      );
+      const livePageIdentity = buildPageIdentity(getJobContext());
+      if (
+        livePageKey !== scan.pageKey ||
+        livePageIdentity !== scan.pageIdentity
+      ) {
+        throw new Error(
+          "The application page changed while Agent 2 was auditing it. Inspect the current page and run the audit again."
         );
+      }
+
+      let combinedAnswers = [...(response.data?.answers || [])];
+      let responseData = { ...response.data, answers: combinedAnswers };
+      const appliedSummary =
+        await applyAnswers(combinedAnswers);
+      const addSummary = next => {
+        for (const key of [
+          "answered", "reviewRequired", "unresolved", "kept", "corrected", "conflicts"
+        ]) {
+          appliedSummary[key] = (appliedSummary[key] || 0) + (next?.[key] || 0);
+        }
+      };
+
+      const seenFieldIds = new Set(agentFields.map(field => field.fieldId));
+
+      // Workday reveals dependent questions after a controlling dropdown is
+      // selected. Audit those newly rendered fields automatically during the
+      // same button click instead of making the applicant run Agent 2 again.
+      if (configuration?.atsPlatform === "workday") {
+        for (let wave = 0; wave < 3; wave += 1) {
+          await delay(550);
+
+          try {
+            const profile = await getProfile();
+            if (typeof configuration.runDeterministic === "function") {
+              await configuration.runDeterministic(profile);
+              await delay(350);
+            }
+          } catch (_) {}
+
+          const waveFields = (await collectFields()).filter(field => {
+            return field?.repairOnly !== true && !seenFieldIds.has(field.fieldId);
+          });
+          waveFields.forEach(field => seenFieldIds.add(field.fieldId));
+          if (waveFields.length === 0) break;
+
+          const waveResponse = await sendBackgroundMessage({
+            action: "ANSWER_APPLICATION_FIELDS",
+            payload: {
+              applicationId: currentApplicationId,
+              atsPlatform: scan.atsPlatform,
+              pageKey: scan.pageKey,
+              pageIdentity: scan.pageIdentity,
+              jobContext: scan.jobContext,
+              scriptStats: {
+                totalFields: scan.totalFields + waveFields.length,
+                scriptFilled: countDeterministicFields()
+              },
+              fields: waveFields
+            }
+          });
+
+          if (!waveResponse?.success) {
+            console.warn(
+              "[FastApply] Conditional Workday audit could not be completed:",
+              waveResponse?.error || "Unknown error"
+            );
+            break;
+          }
+
+          currentApplicationId = waveResponse.data?.applicationId || currentApplicationId;
+          const waveAnswers = waveResponse.data?.answers || [];
+          combinedAnswers = [...combinedAnswers, ...waveAnswers];
+          responseData = {
+            ...responseData,
+            ...waveResponse.data,
+            answers: combinedAnswers
+          };
+          addSummary(await applyAnswers(waveAnswers));
+        }
+      }
+
+      await delay(350);
+      const postApplyFields = await collectFields();
+      const postApplyAuditable = postApplyFields.filter(field => {
+        return field?.repairOnly !== true;
+      });
+      const emptyAfterApply = postApplyAuditable.filter(field => {
+        return !hasFieldValue(field?.currentValue);
+      }).length;
+      const invalidAfterApply = postApplyAuditable.filter(field => {
+        return field?.validity?.valid === false;
+      }).length;
+      const attentionAfterApply = postApplyAuditable.filter(field => {
+        return !hasFieldValue(field?.currentValue) ||
+          field?.validity?.valid === false;
+      }).length;
+      const verifiedUnresolved = Math.max(
+        appliedSummary.unresolved || 0,
+        attentionAfterApply + repairOnlyFields.length
+      );
 
       const syncResponse = currentApplicationId
         ? await sendBackgroundMessage({
             action: "SYNC_APPLICATION_ANSWERS",
             payload: {
               applicationId: currentApplicationId,
-              answers: response.data?.answers || []
+              answers: combinedAnswers
             }
           })
         : {
@@ -1096,21 +1800,35 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         new Date().toISOString();
 
       const enrichedResult = {
-        ...response.data,
+        ...responseData,
         applicationId:
           currentApplicationId,
         pageUrl:
           scan.pageUrl,
+        pageKey:
+          scan.pageKey,
+        pageIdentity:
+          scan.pageIdentity,
         atsPlatform:
           scan.atsPlatform,
         scriptFilled:
           scan.scriptFilled,
         appliedFields:
           appliedSummary.answered,
+        validatedFields:
+          appliedSummary.kept || 0,
+        correctedFields:
+          appliedSummary.corrected || 0,
+        conflictFields:
+          appliedSummary.conflicts || 0,
         reviewRequiredFields:
           appliedSummary.reviewRequired,
         unresolvedAfterApply:
-          appliedSummary.unresolved + repairOnlyFields.length,
+          verifiedUnresolved,
+        emptyAfterApply,
+        invalidAfterApply,
+        fieldsAfterApply:
+          postApplyFields,
         persistenceWarning,
         completedAt
       };
@@ -1119,19 +1837,24 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         applicationId:
           currentApplicationId,
         status:
-          response.data?.status ||
-          "ready_for_review",
+          verifiedUnresolved > 0 ||
+          (appliedSummary.conflicts || 0) > 0 ||
+          appliedSummary.reviewRequired > 0
+            ? "ready_for_review"
+            : "complete",
         pageUrl:
           scan.pageUrl,
+        pageKey:
+          scan.pageKey,
         atsPlatform:
           scan.atsPlatform,
         company:
-          response.data?.jobContext
+          responseData?.jobContext
             ?.company ||
           scan.jobContext.company ||
           "",
         jobTitle:
-          response.data?.jobContext
+          responseData?.jobContext
             ?.jobTitle ||
           scan.jobContext.jobTitle ||
           "",
@@ -1140,13 +1863,19 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         scriptFilled:
           scan.scriptFilled,
         requestedFields:
-          agentFields.length,
+          seenFieldIds.size,
         answered:
           appliedSummary.answered,
+        validated:
+          appliedSummary.kept || 0,
+        corrected:
+          appliedSummary.corrected || 0,
+        conflicts:
+          appliedSummary.conflicts || 0,
         reviewRequired:
           appliedSummary.reviewRequired,
         unresolved:
-          appliedSummary.unresolved + repairOnlyFields.length,
+          verifiedUnresolved,
         startedAt,
         updatedAt:
           completedAt
@@ -1238,6 +1967,10 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
           "",
         pageUrl:
           window.location.href,
+        pageKey:
+          cleanText(
+            configuration?.getPageKey?.() || window.location.pathname
+          ),
         supportedControls:
           U.queryAgentElements(
             document,
@@ -1245,7 +1978,8 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
           ).length,
         scan:
           latestScan,
-        agent2InFlight
+        agent2InFlight,
+        scanInFlight
       }
     };
   };
@@ -1263,6 +1997,10 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         options?.applyAnswers,
       repairFields:
         options?.repairFields,
+      prepareScan:
+        options?.prepareScan,
+      getPageKey:
+        options?.getPageKey,
       extractJobContext:
         options?.extractJobContext
     };

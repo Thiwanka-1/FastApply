@@ -6,23 +6,57 @@ window.EightfoldEngine.wait = (ms) => new Promise((resolve) => setTimeout(resolv
 
 // Native React Injector
 window.EightfoldEngine.setNativeValue = (element, value) => {
-    if (!element || !value || element.dataset.fa_filled === "true") return;
+    const utils = window.FastApplyUtils;
+    if (
+        !element ||
+        !value ||
+        element.dataset.fa_filled === "true" ||
+        utils?.isProtectedFromDeterministicFill?.(element)
+    ) return false;
+
+    const selected = element.tagName === "SELECT"
+        ? element.options?.[element.selectedIndex]
+        : null;
+    const selectedIsPlaceholder = selected && /^(select|select one|choose|choose one|please select|none)$/i.test(
+        String(selected.text || selected.label || selected.value || "").trim()
+    );
+    if (
+        (element.tagName === "SELECT" && selected && !selected.disabled && !selectedIsPlaceholder && String(selected.value || "").trim()) ||
+        (element.tagName !== "SELECT" && String(element.value || "").trim())
+    ) return false;
+
+    const label = String(utils?.getLabelText?.(element) || "").toLowerCase();
+    const target = element.type === "url" || /url|website|linkedin|github|portfolio/.test(label)
+        ? utils?.ensureHttpUrl?.(value)
+        : element.type === "tel" || /phone|telephone|mobile/.test(label)
+            ? utils?.formatPhoneNumber?.(value)
+            : String(value);
+    if (!target) return false;
     element.focus();
-    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set ||
-                         Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set ||
-                         Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")?.set;
+    const prototype = element.tagName === "TEXTAREA"
+        ? window.HTMLTextAreaElement.prototype
+        : element.tagName === "SELECT"
+            ? window.HTMLSelectElement.prototype
+            : window.HTMLInputElement.prototype;
+    const nativeSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
     if (nativeSetter) {
-        nativeSetter.call(element, value);
+        nativeSetter.call(element, target);
     } else {
-        element.value = value;
+        element.value = target;
     }
     element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
     element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    if (!String(element.value || "").trim()) return false;
     element.dataset.fa_filled = "true";
+    utils?.setValueOwner?.(element, "deterministic");
+    return true;
 };
 
 // Custom Fuzzy Matcher for Eightfold's specific EEO options
 window.EightfoldEngine.smartMatch = (optText, targetValue) => {
+    if (typeof window.FastApplyUtils?.smartMatch === "function") {
+        return window.FastApplyUtils.smartMatch(optText, targetValue);
+    }
     const o = String(optText || "").toLowerCase().trim();
     const t = String(targetValue || "").toLowerCase().trim();
     if (!o || !t) return false;
@@ -99,7 +133,12 @@ window.EightfoldEngine.fillRadioGroup = (questionText, answerValue) => {
         if (!container) break;
         const radios = Array.from(container.querySelectorAll('input[type="radio"]'));
         
-        if (radios.length > 0 && !radios[0].dataset.fa_filled) {
+        if (
+            radios.length > 0 &&
+            !radios[0].dataset.fa_filled &&
+            !radios.some(radio => radio.checked) &&
+            !radios.some(radio => window.FastApplyUtils?.isProtectedFromDeterministicFill?.(radio))
+        ) {
             const labels = Array.from(container.querySelectorAll('label'));
             let matchedLabel = labels.find(l => window.EightfoldEngine.smartMatch(l.innerText, answerValue));
             
@@ -107,7 +146,10 @@ window.EightfoldEngine.fillRadioGroup = (questionText, answerValue) => {
                 const radio = container.querySelector(`input[id="${matchedLabel.htmlFor}"]`) || matchedLabel.querySelector('input[type="radio"]');
                 if (radio && !radio.checked) {
                     radio.click(); 
-                    radios.forEach(r => r.dataset.fa_filled = "true"); 
+                    radios.forEach(r => {
+                        r.dataset.fa_filled = "true";
+                        window.FastApplyUtils?.setValueOwner?.(r, "deterministic");
+                    });
                 }
             }
             break;
@@ -175,10 +217,32 @@ window.EightfoldEngine.runAutofill = async (profile) => {
 const startEightfoldEngine = () => {
     chrome.storage.local.get(["autofillEnabled", "profileData"], (res) => {
         if (res.autofillEnabled === false || !res.profileData) return;
+        let currentProfile = res.profileData;
+        let pendingRun = 0;
+        const run = () => window.EightfoldEngine.runAutofill(currentProfile);
+        const schedule = () => {
+            clearTimeout(pendingRun);
+            pendingRun = setTimeout(run, 300);
+        };
 
-        setInterval(() => {
-            window.EightfoldEngine.runAutofill(res.profileData);
-        }, 1500); 
+        run();
+        const observer = new MutationObserver(mutations => {
+            const addedFormControls = mutations.some(mutation => {
+                return Array.from(mutation.addedNodes || []).some(node => {
+                    return node.nodeType === Node.ELEMENT_NODE &&
+                        (node.matches?.('input, select, textarea, form') ||
+                         node.querySelector?.('input, select, textarea, form'));
+                });
+            });
+            if (addedFormControls) schedule();
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+
+        chrome.storage.onChanged.addListener((changes, areaName) => {
+            if (areaName === "local" && changes.profileData?.newValue) {
+                currentProfile = changes.profileData.newValue;
+            }
+        });
     });
 };
 

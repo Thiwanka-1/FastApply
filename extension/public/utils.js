@@ -3,6 +3,170 @@ console.log("[FastApply] Utils Loaded.");
 
 const normalizeValue = (value) => String(value ?? "").trim();
 
+const fieldOwnership = new Map();
+
+const getFieldOwnershipKey = element => {
+  if (!element) return "";
+
+  const automationId = element.getAttribute?.("data-automation-id") || "";
+  const queryRoot = element.getRootNode?.() || document;
+  const tagName = element.tagName || "";
+  const elementOrdinal = tagName && queryRoot.querySelectorAll
+    ? Array.from(queryRoot.querySelectorAll(tagName)).indexOf(element)
+    : -1;
+  const pageKey = window.WorkdayEngine?.getPageKey?.() ||
+    window.location.pathname;
+  const identity = [
+    pageKey,
+    tagName,
+    element.getAttribute?.("type") || "",
+    element.id || "",
+    element.getAttribute?.("name") || "",
+    automationId,
+    element.getAttribute?.("aria-label") || "",
+    element.getAttribute?.("aria-labelledby") || "",
+    getLabelText(element),
+    elementOrdinal
+  ].join("|");
+
+  return identity;
+};
+
+const getValueOwner = element => {
+  if (!element) return "";
+  return element.dataset?.fa_owner ||
+    fieldOwnership.get(getFieldOwnershipKey(element)) ||
+    "";
+};
+
+const setValueOwner = (element, owner) => {
+  if (!element || !owner) return;
+  const key = getFieldOwnershipKey(element);
+  if (key) fieldOwnership.set(key, owner);
+  element.dataset.fa_owner = owner;
+
+  if (owner === "agent") {
+    element.dataset.fa_agent_filled = "true";
+    delete element.dataset.fa_user_owned;
+  } else if (owner === "user") {
+    element.dataset.fa_user_owned = "true";
+    delete element.dataset.fa_agent_filled;
+    delete element.dataset.fa_filled;
+  }
+};
+
+const isProtectedFromDeterministicFill = element => {
+  const owner = getValueOwner(element);
+  return owner === "user" || owner === "agent";
+};
+
+const getEditableEventTarget = target => {
+  if (!target?.closest) return null;
+  return target.closest([
+    "input",
+    "select",
+    "textarea",
+    '[contenteditable="true"]',
+    '[role="combobox"]',
+    '[role="radio"]',
+    '[role="checkbox"]',
+    '[role="switch"]',
+    '[data-automation-id="selectWidget"]'
+  ].join(","));
+};
+
+const trackTrustedUserEdit = event => {
+  if (!event.isTrusted) return;
+
+  if (event.type === "click") {
+    const choice = event.target?.closest?.([
+      'input[type="radio"]',
+      'input[type="checkbox"]',
+      '[role="radio"]',
+      '[role="checkbox"]',
+      '[role="switch"]'
+    ].join(","));
+    if (choice) {
+      setValueOwner(choice, "user");
+      return;
+    }
+
+    const option = event.target?.closest?.([
+      '[role="option"]',
+      '[data-automation-id="promptOption"]',
+      '[data-automation-id="multiSelectOption"]',
+      '[data-automation-id="menuItem"]'
+    ].join(","));
+    if (option) {
+      const expandedControls = queryAgentElements(
+        document,
+        '[aria-expanded="true"][role="combobox"], [aria-expanded="true"][aria-haspopup="listbox"]'
+      ).filter(isElementVisible);
+      const control = expandedControls[expandedControls.length - 1];
+      if (control) setValueOwner(control, "user");
+      return;
+    }
+
+    const answerButton = event.target?.closest?.("button");
+    const answerText = normalizeText(getElementText(answerButton));
+    if (
+      answerButton &&
+      (answerButton.hasAttribute("aria-pressed") || /^(yes|no)$/.test(answerText))
+    ) {
+      setValueOwner(answerButton, "user");
+    }
+    return;
+  }
+
+  const element = getEditableEventTarget(event.target);
+  if (element) setValueOwner(element, "user");
+};
+
+document.addEventListener("input", trackTrustedUserEdit, true);
+document.addEventListener("change", trackTrustedUserEdit, true);
+document.addEventListener("click", trackTrustedUserEdit, true);
+
+const ensureHttpUrl = value => {
+  const raw = normalizeValue(value);
+  if (!raw) return "";
+  if (/^(mailto|javascript|data):/i.test(raw)) return "";
+
+  const candidate = /^https?:\/\//i.test(raw)
+    ? raw
+    : `https://${raw.replace(/^\/+/, "")}`;
+
+  try {
+    const parsed = new URL(candidate);
+    return ["http:", "https:"].includes(parsed.protocol)
+      ? parsed.href
+      : "";
+  } catch (_) {
+    return "";
+  }
+};
+
+const formatPhoneNumber = (value, options = {}) => {
+  const raw = normalizeValue(value);
+  if (!raw) return "";
+  const digits = raw.replace(/\D/g, "");
+  const national = options.national === true;
+  const country = normalizeValue(
+    options.country || options.countryCode || ""
+  ).toLowerCase();
+  const isUnitedStates = options.us === true ||
+    /^(us|usa|united states|united states of america|\+?1)$/.test(country);
+  const usDigits = digits.length === 11 && digits.startsWith("1")
+    ? digits.slice(1)
+    : digits;
+
+  if (isUnitedStates && usDigits.length === 10) {
+    return `(${usDigits.slice(0, 3)}) ${usDigits.slice(3, 6)}-${usDigits.slice(6)}`;
+  }
+
+  if (national) return digits;
+  return raw.startsWith("+") ? `+${digits}` : raw;
+};
+
 const setNativeValue = (element, value) => {
   if (!element) return;
 
@@ -95,11 +259,12 @@ const triggerEvents = (element, options = {}) => {
   } catch (_) {}
 };
 
-const markFilled = (element, type = "field") => {
+const markFilled = (element, type = "field", source = "deterministic") => {
   if (!element) return;
 
   element.dataset.fa_filled = "true";
   element.dataset.fa_fill_type = type;
+  setValueOwner(element, source);
 
   try {
     if (type === "dropdown") {
@@ -135,13 +300,6 @@ const hasWholeWord = (text, word) => {
   } catch (_) {
     return false;
   }
-};
-
-const tokensOf = (text) => {
-  return normalizeText(text)
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter(Boolean);
 };
 
 const includesAnyWholeWord = (text, words) => {
@@ -191,8 +349,8 @@ const classifyGender = (text) => {
 
 const classifyYesNo = (text) => {
   const t = normalizeText(text);
-  if (t.startsWith("yes") || hasWholeWord(t, "yes")) return "yes";
-  if (t.startsWith("no") || hasWholeWord(t, "no")) return "no";
+  if (t === "true" || t.startsWith("yes") || hasWholeWord(t, "yes")) return "yes";
+  if (t === "false" || t.startsWith("no") || hasWholeWord(t, "no")) return "no";
   return "";
 };
 
@@ -235,6 +393,11 @@ const classifyEthnicity = (text) => {
     return "optout";
   }
 
+  if (
+    /\b(not|non)\s+(hispanic|latino|latina|latinx)\b/.test(t) ||
+    /\bno\b.*\b(hispanic|latino|latina|latinx)\b/.test(t)
+  ) return "not_hispanic";
+
   if (t.includes("hispanic") || t.includes("latino") || t.includes("latinx")) return "hispanic";
   if (t.includes("asian")) return "asian";
   if (t.includes("black") || t.includes("african")) return "black";
@@ -246,97 +409,239 @@ const classifyEthnicity = (text) => {
   return "";
 };
 
-// Global smart matcher (strict for sensitive dropdowns)
+const SEMANTIC_STOP_WORDS = new Set([
+  "a", "an", "and", "for", "of", "or", "the", "to"
+]);
+
+const normalizeSemanticText = value => {
+  let normalized = String(value ?? "")
+    .toLowerCase()
+    .replace(/\.net\b/g, " dotnet ")
+    .replace(/\bc\s*#/g, " csharp ")
+    .replace(/\bf\s*#/g, " fsharp ");
+
+  normalized = normalizeText(normalized)
+    .replace(/\bnode\s*\.?\s*js\b/g, "nodejs")
+    .replace(/\breact\s*\.?\s*js\b/g, "react")
+    .replace(/\bvue\s*\.?\s*js\b/g, "vue")
+    .replace(/\bangular\s*\.?\s*js\b/g, "angular")
+    .replace(/\bnext\s*\.?\s*js\b/g, "nextjs")
+    .replace(/\bms sql server\b/g, "microsoft sql server")
+    .replace(/\bamazon web services\b/g, "aws")
+    .replace(/\bgoogle cloud platform\b/g, "gcp")
+    .replace(/\bk8s\b/g, "kubernetes")
+    .replace(/\bstructured query language\b/g, "sql")
+    .replace(/\bservice organization controls?\s*2\b/g, "soc2")
+    .replace(/\bsoc\s*2\b/g, "soc2")
+    .replace(/\bunited states of america\b/g, "united states")
+    .replace(/\brequest for quotation\b/g, "request quotation")
+    .replace(/\brfq\b/g, "request quotation")
+    .replace(/\brequest for proposal\b/g, "request proposal")
+    .replace(/\brfp\b/g, "request proposal")
+    .replace(/\brequest for information\b/g, "request information")
+    .replace(/\brfi\b/g, "request information")
+    .replace(/\b(programming|query|markup|scripting) language\b/g, " ")
+    .replace(/\b(software skill|framework|library|platform|technology|methodology|standard|protocol|tool)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const wholeAliases = new Map([
+    ["js", "javascript"],
+    ["ts", "typescript"],
+    ["us", "united states"],
+    ["u s", "united states"],
+    ["usa", "united states"],
+    ["uk", "united kingdom"],
+    ["u k", "united kingdom"],
+    ["b e", "bachelor engineering"],
+    ["be", "bachelor engineering"],
+    ["beng", "bachelor engineering"],
+    ["b sc", "bachelor science"],
+    ["bs", "bachelor science"],
+    ["bsc", "bachelor science"],
+    ["b a", "bachelor arts"],
+    ["ba", "bachelor arts"],
+    ["m sc", "master science"],
+    ["ms", "master science"],
+    ["msc", "master science"],
+    ["m a", "master arts"],
+    ["ma", "master arts"],
+    ["mba", "master business administration"],
+    ["ph d", "doctor philosophy"],
+    ["phd", "doctor philosophy"]
+  ]);
+
+  return wholeAliases.get(normalized) || normalized;
+};
+
+const semanticTokensOf = value => normalizeSemanticText(value)
+  .split(/\s+/)
+  .filter(token => token && !SEMANTIC_STOP_WORDS.has(token));
+
+const classifySemanticPolarity = text => {
+  const value = normalizeText(text);
+  if (!value) return "";
+  if (
+    value.includes("prefer not") ||
+    value.includes("decline") ||
+    value.includes("choose not") ||
+    value.includes("do not wish") ||
+    value.includes("do not want")
+  ) return "optout";
+  if (/\b(do not|does not|did not|will not|not agree|not acknowledge|not authorized|not willing)\b/.test(value)) {
+    return "no";
+  }
+  if (/^(false|no)(\b|$)/.test(value) && !/^no preference\b/.test(value)) return "no";
+  if (/^(true|yes)(\b|$)/.test(value)) return "yes";
+  if (/\b(agree|agreed|accept|acknowledge|acknowledged|certify|consent)\b/.test(value)) {
+    return "yes";
+  }
+  return "";
+};
+
+const getDegreeLevel = value => {
+  const normalized = normalizeSemanticText(value);
+  if (/\b(high school|secondary school|ged)\b/.test(normalized)) return "high-school";
+  if (/\b(associate|associates)\b/.test(normalized)) return "associate";
+  if (/\b(bachelor|bachelors|baccalaureate)\b/.test(normalized)) return "bachelor";
+  if (/\b(master|masters)\b/.test(normalized)) return "master";
+  if (/\b(doctor|doctorate|doctoral|juris doctor)\b/.test(normalized)) return "doctorate";
+  if (/\b(certificate|certification)\b/.test(normalized)) return "certificate";
+  if (/\bdiploma\b/.test(normalized)) return "diploma";
+  return "";
+};
+
+const getSemanticCategory = value => {
+  const polarity = classifySemanticPolarity(value);
+  if (polarity) return `polarity:${polarity}`;
+
+  const pronoun = classifyPronouns(value);
+  if (pronoun) return `pronoun:${pronoun}`;
+  const gender = classifyGender(value);
+  if (gender) return `gender:${gender}`;
+  const veteran = classifyVeteran(value);
+  if (veteran) return `veteran:${veteran}`;
+  const ethnicity = classifyEthnicity(value);
+  if (ethnicity) return `ethnicity:${ethnicity}`;
+  return "";
+};
+
+const getSemanticMatchScore = (optionText, targetValue) => {
+  const option = normalizeSemanticText(optionText);
+  const target = normalizeSemanticText(targetValue);
+  if (!option || !target) return 0;
+  if (normalizeText(optionText) === normalizeText(targetValue)) return 1;
+  if (option === target) return 0.99;
+
+  const optionCategory = getSemanticCategory(optionText);
+  const targetCategory = getSemanticCategory(targetValue);
+  if (optionCategory || targetCategory) {
+    return optionCategory && optionCategory === targetCategory ? 0.98 : 0;
+  }
+
+  const parentheticalAliases = value => Array.from(
+    String(value ?? "").matchAll(/\(([^)]+)\)/g),
+    match => normalizeSemanticText(match[1])
+  ).filter(Boolean);
+  const optionAliases = parentheticalAliases(optionText);
+  const targetAliases = parentheticalAliases(targetValue);
+  if (
+    optionAliases.includes(target) ||
+    targetAliases.includes(option) ||
+    optionAliases.some(alias => targetAliases.includes(alias))
+  ) return 0.98;
+
+  const optionDegree = getDegreeLevel(option);
+  const targetDegree = getDegreeLevel(target);
+  if (optionDegree || targetDegree) {
+    if (!optionDegree || optionDegree !== targetDegree) return 0;
+    const genericDegree = value => {
+      const tokens = semanticTokensOf(value).filter(token => {
+        return ![
+          "degree", "degrees", "bachelor", "bachelors", "master", "masters",
+          "doctor", "doctorate", "doctoral", "associate", "associates",
+          "certificate", "certification", "diploma", "s"
+        ].includes(token);
+      });
+      return tokens.length === 0;
+    };
+    if (genericDegree(option) || genericDegree(target)) return 0.86;
+  }
+
+  const optionTokens = [...new Set(semanticTokensOf(option))];
+  const targetTokens = [...new Set(semanticTokensOf(target))];
+  if (!optionTokens.length || !targetTokens.length) return 0;
+
+  if (targetTokens.length === 1 && optionTokens.length > 1) {
+    const acronym = optionTokens.map(token => token[0]).join("");
+    if (targetTokens[0].length >= 2 && targetTokens[0] === acronym) return 0.96;
+  }
+  if (optionTokens.length === 1 && targetTokens.length > 1) {
+    const acronym = targetTokens.map(token => token[0]).join("");
+    if (optionTokens[0].length >= 2 && optionTokens[0] === acronym) return 0.96;
+  }
+
+  const intersection = targetTokens.filter(token => optionTokens.includes(token)).length;
+  if (!intersection) return 0;
+  const targetCoverage = intersection / targetTokens.length;
+  const optionCoverage = intersection / optionTokens.length;
+  const dice = (2 * intersection) / (targetTokens.length + optionTokens.length);
+
+  if (
+    intersection === targetTokens.length &&
+    intersection === optionTokens.length
+  ) return 0.98;
+  if (intersection >= 2 && (targetCoverage === 1 || optionCoverage === 1)) {
+    return 0.88;
+  }
+
+  // A single generic shared word is not enough. A one-word target is accepted
+  // only when the option is essentially the same skill/name plus one qualifier.
+  if (
+    intersection === 1 &&
+    Math.max(targetTokens.length, optionTokens.length) > 2
+  ) return 0;
+
+  return (0.55 * Math.min(targetCoverage, optionCoverage)) +
+    (0.3 * Math.max(targetCoverage, optionCoverage)) +
+    (0.15 * dice);
+};
+
+const findBestSemanticMatch = (
+  items,
+  targetValue,
+  getText = item => item,
+  settings = {}
+) => {
+  const candidates = Array.from(items || []).filter(Boolean);
+  const exact = candidates.filter(item => {
+    return normalizeText(getText(item)) === normalizeText(targetValue);
+  });
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) return null;
+
+  const minimumScore = Number.isFinite(settings.minimumScore)
+    ? settings.minimumScore
+    : 0.74;
+  const minimumGap = Number.isFinite(settings.minimumGap)
+    ? settings.minimumGap
+    : 0.06;
+  const ranked = candidates
+    .map(item => ({ item, score: getSemanticMatchScore(getText(item), targetValue) }))
+    .filter(candidate => candidate.score >= minimumScore)
+    .sort((a, b) => b.score - a.score);
+
+  if (!ranked.length) return null;
+  if (
+    ranked.length > 1 &&
+    ranked[0].score - ranked[1].score < minimumGap
+  ) return null;
+  return ranked[0].item;
+};
+
+// Global meaning matcher. Callers still require a unique winning option.
 const smartMatch = (optText, targetValue) => {
-  const o = normalizeText(optText);
-  const t = normalizeText(targetValue);
-
-  if (!o || !t) return false;
-  if (o === t) return true;
-
-  // 1. Opt-out matching
-  const targetLooksOptOut =
-    t.includes("decline") ||
-    t.includes("prefer not") ||
-    t.includes("choose not") ||
-    t.includes("do not wish") ||
-    t.includes("do not want");
-
-  if (targetLooksOptOut) {
-    if (
-      o.includes("decline") ||
-      o.includes("prefer not") ||
-      o.includes("wish to answer") ||
-      o.includes("not wish") ||
-      o.includes("choose not") ||
-      o.includes("do not wish") ||
-      o.includes("do not want") ||
-      o.includes("self identify later")
-    ) {
-      return true;
-    }
-    return false;
-  }
-
-  // 2. Strict pronoun matching
-  const targetPronoun = classifyPronouns(t);
-  const optionPronoun = classifyPronouns(o);
-  if (targetPronoun || optionPronoun) {
-    return !!targetPronoun && targetPronoun === optionPronoun;
-  }
-
-  // 3. Strict gender matching
-  const targetGender = classifyGender(t);
-  const optionGender = classifyGender(o);
-  if (targetGender || optionGender) {
-    return !!targetGender && targetGender === optionGender;
-  }
-
-  // 4. Strict yes/no matching
-  const targetYesNo = classifyYesNo(t);
-  const optionYesNo = classifyYesNo(o);
-  if (targetYesNo || optionYesNo) {
-    return !!targetYesNo && targetYesNo === optionYesNo;
-  }
-
-  // 5. Strict veteran matching
-  const targetVeteran = classifyVeteran(t);
-  const optionVeteran = classifyVeteran(o);
-  if (targetVeteran || optionVeteran) {
-    return !!targetVeteran && targetVeteran === optionVeteran;
-  }
-
-  // 6. Strict ethnicity/race matching
-  const targetEthnicity = classifyEthnicity(t);
-  const optionEthnicity = classifyEthnicity(o);
-  if (targetEthnicity || optionEthnicity) {
-    return !!targetEthnicity && targetEthnicity === optionEthnicity;
-  }
-
-  // 7. Safe regex exact-word match
-  try {
-    const escapedT = escapeRegex(t);
-    const escapedO = escapeRegex(o);
-
-    if (new RegExp(`\\b${escapedT}\\b`, "i").test(o)) return true;
-    if (new RegExp(`\\b${escapedO}\\b`, "i").test(t)) return true;
-  } catch (_) {}
-
-  // 8. Token overlap fallback
-  const tTokens = tokensOf(t);
-  const oTokens = tokensOf(o);
-
-  if (tTokens.length && oTokens.length) {
-    const overlap = tTokens.filter((token) => token.length > 3 && oTokens.includes(token));
-    if (overlap.length >= 1) return true;
-  }
-
-  // 9. Final cautious substring fallback
-  if (t.length > 3 && o.length > 3) {
-    if (o.includes(t) || t.includes(o)) return true;
-  }
-
-  return false;
+  return getSemanticMatchScore(optText, targetValue) >= 0.74;
 };
 
 const getElementText = (el) => {
@@ -419,10 +724,22 @@ const getLabelText = (input) => {
   return text;
 };
 
-const fillField = (element, value) => {
-  const normalizedValue = normalizeValue(value);
+const fillField = (element, value, options = {}) => {
+  const source = options.source === "agent" ? "agent" : "deterministic";
+  const force = options.force === true;
+  const normalizedValue = prepareValueForElement(element, value);
 
-  if (!element || !normalizedValue || isAlreadyFilled(element) || element.disabled || element.readOnly) {
+  if (
+    !element ||
+    !normalizedValue ||
+    element.disabled ||
+    element.readOnly ||
+    (!force && (
+      isAlreadyFilled(element) ||
+      isProtectedFromDeterministicFill(element) ||
+      getElementCurrentValue(element)
+    ))
+  ) {
     return false;
   }
 
@@ -441,7 +758,10 @@ const fillField = (element, value) => {
       triggerEvents(element, { withFocus: false, withInput: false, withChange: false, withBlur: true });
     }
 
-    markFilled(element, "field");
+    const retainedValue = getElementCurrentValue(element);
+    if (!retainedValue) return false;
+
+    markFilled(element, "field", source);
     return true;
   } catch (error) {
     console.warn("[FastApply] fillField failed:", error);
@@ -455,22 +775,28 @@ const tryClickSuggestion = (root, value) => {
 
   const selectors = [
     '[role="option"]',
-    '[role="listbox"] [role="option"]',
-    "li",
+    '[role="listbox"] li',
+    '[aria-selected]',
     ".dropdown-item",
     ".dropdown-option",
     ".dropdown-container li",
-    ".pac-item",
-    "a",
-    "div"
+    ".pac-item"
   ];
 
   for (const selector of selectors) {
-    const items = Array.from(root.querySelectorAll(selector));
-    const match =
-      items.find((item) => smartMatch(getElementText(item), normalized)) ||
-      items.find((item) => normalizeText(getElementText(item)).includes(normalized)) ||
-      items[0];
+    const items = Array.from(root.querySelectorAll(selector))
+      .filter(isElementVisible)
+      .filter(item => item.getAttribute?.("aria-disabled") !== "true");
+    const exact = items.find(item => {
+      return normalizeText(getElementText(item)) === normalized;
+    });
+    const semanticMatches = exact ? [] : items.filter(item => {
+      const itemText = normalizeText(getElementText(item));
+      return smartMatch(itemText, normalized) ||
+        itemText.includes(normalized) ||
+        normalized.includes(itemText);
+    });
+    const match = exact || (semanticMatches.length === 1 ? semanticMatches[0] : null);
 
     if (match) {
       try {
@@ -484,25 +810,31 @@ const tryClickSuggestion = (root, value) => {
   return false;
 };
 
-const fillAutocomplete = (visibleInput, hiddenInput, value) => {
+const fillAutocomplete = (visibleInput, hiddenInput, value, options = {}) => {
+  const source = options.source === "agent" ? "agent" : "deterministic";
+  const force = options.force === true;
   const normalizedValue = normalizeValue(value);
 
-  if (!visibleInput || !normalizedValue || isAlreadyFilled(visibleInput) || visibleInput.disabled || visibleInput.readOnly) {
+  if (
+    !visibleInput ||
+    !normalizedValue ||
+    visibleInput.disabled ||
+    visibleInput.readOnly ||
+    visibleInput.dataset.fa_autocomplete_processing === "true" ||
+    (!force && (
+      isAlreadyFilled(visibleInput) ||
+      isProtectedFromDeterministicFill(visibleInput) ||
+      getElementCurrentValue(visibleInput)
+    ))
+  ) {
     return false;
   }
 
   try {
+    visibleInput.dataset.fa_autocomplete_processing = "true";
     triggerEvents(visibleInput, { withFocus: true, withInput: false, withChange: false, withBlur: false });
     setNativeValue(visibleInput, normalizedValue);
     triggerEvents(visibleInput, { withFocus: false, withInput: true, withChange: true, withBlur: false, withKeyboard: true });
-
-    if (hiddenInput && !hiddenInput.disabled && !hiddenInput.readOnly) {
-      setNativeValue(hiddenInput, normalizedValue);
-      triggerEvents(hiddenInput, { withFocus: false, withInput: true, withChange: true, withBlur: false });
-      markFilled(hiddenInput, "hidden-autocomplete");
-    }
-
-    markFilled(visibleInput, "autocomplete");
 
     setTimeout(() => {
       const candidates = [
@@ -513,28 +845,97 @@ const fillAutocomplete = (visibleInput, hiddenInput, value) => {
         document.querySelector('[role="listbox"]'),
       ].filter(Boolean);
 
+      let suggestionSelected = false;
       for (const root of candidates) {
-        if (tryClickSuggestion(root, normalizedValue)) break;
+        if (tryClickSuggestion(root, normalizedValue)) {
+          suggestionSelected = true;
+          break;
+        }
       }
 
-      triggerEvents(visibleInput, { withFocus: false, withInput: false, withChange: false, withBlur: true });
+      setTimeout(() => {
+        const resolveLiveElement = element => {
+          if (!element) return null;
+          if (element.isConnected) return element;
+          if (element.id) {
+            const byId = document.getElementById(element.id);
+            if (byId) return byId;
+          }
+          const name = element.getAttribute?.("name");
+          if (name) {
+            try {
+              return document.querySelector(`[name="${CSS.escape(name)}"]`);
+            } catch (_) {}
+          }
+          return null;
+        };
+
+        const liveVisible = resolveLiveElement(visibleInput) || visibleInput;
+        const liveHidden = resolveLiveElement(hiddenInput);
+        const visibleRetained = Boolean(getElementCurrentValue(liveVisible));
+        const hiddenRetained = !hiddenInput || Boolean(getElementCurrentValue(liveHidden));
+        const valid = liveVisible.getAttribute?.("aria-invalid") !== "true" &&
+          (typeof liveVisible.checkValidity !== "function" || liveVisible.checkValidity());
+
+        if (suggestionSelected && visibleRetained && hiddenRetained && valid) {
+          markFilled(liveVisible, "autocomplete", source);
+          if (liveHidden) markFilled(liveHidden, "hidden-autocomplete", source);
+        } else if (!isProtectedFromDeterministicFill(liveVisible)) {
+          // A typed search string is not a selected autocomplete value. Remove
+          // only our unchanged attempt so an invalid raw location is never
+          // stranded as an apparently completed field.
+          if (normalizeText(getElementCurrentValue(liveVisible)) === normalizeText(normalizedValue)) {
+            setNativeValue(liveVisible, "");
+            triggerEvents(liveVisible, {
+              withFocus: false,
+              withInput: true,
+              withChange: true,
+              withBlur: false
+            });
+          }
+        }
+
+        delete visibleInput.dataset.fa_autocomplete_processing;
+        if (liveVisible !== visibleInput) {
+          delete liveVisible.dataset.fa_autocomplete_processing;
+        }
+        triggerEvents(liveVisible, { withFocus: false, withInput: false, withChange: false, withBlur: true });
+      }, 250);
     }, 800);
 
     return true;
   } catch (error) {
+    delete visibleInput?.dataset?.fa_autocomplete_processing;
     console.warn("[FastApply] fillAutocomplete failed:", error);
     return false;
   }
 };
 
-const fillDropdown = (selectElement, targetValue) => {
+const isPlaceholderOption = option => {
+  if (!option) return true;
+  const value = normalizeValue(option.value);
+  const text = normalizeText(option.text);
+  return option.disabled ||
+    !value ||
+    /^(select|select one|choose|choose one|please select)$/.test(text);
+};
+
+const fillDropdown = (selectElement, targetValue, options = {}) => {
+  const source = options.source === "agent" ? "agent" : "deterministic";
+  const force = options.force === true;
+  const exactOnly = options.exact === true || source === "agent";
   const normalizedTarget = normalizeValue(targetValue);
+  const selectedBefore = selectElement?.options?.[selectElement.selectedIndex];
 
   if (
     !selectElement ||
     !normalizedTarget ||
-    isAlreadyFilled(selectElement) ||
-    selectElement.disabled
+    selectElement.disabled ||
+    (!force && (
+      isAlreadyFilled(selectElement) ||
+      isProtectedFromDeterministicFill(selectElement) ||
+      !isPlaceholderOption(selectedBefore)
+    ))
   ) {
     return false;
   }
@@ -548,15 +949,12 @@ const fillDropdown = (selectElement, targetValue) => {
       options.find((opt) => normalizeText(opt.text) === normalizeText(normalizedTarget)) ||
       options.find((opt) => normalizeText(opt.value) === normalizeText(normalizedTarget));
 
-    if (!matchedOption) {
-      const semanticMatches = options.filter(opt => {
-        return smartMatch(opt.text, normalizedTarget) ||
-          smartMatch(opt.value, normalizedTarget);
-      });
-
-      if (semanticMatches.length === 1) {
-        matchedOption = semanticMatches[0];
-      }
+    if (!matchedOption && !exactOnly) {
+      matchedOption = findBestSemanticMatch(
+        options.filter(opt => !isPlaceholderOption(opt)),
+        normalizedTarget,
+        opt => opt.text || opt.value || ""
+      );
     }
 
     if (!matchedOption) return false;
@@ -566,7 +964,10 @@ const fillDropdown = (selectElement, targetValue) => {
     selectElement.selectedIndex = matchedOption.index;
     triggerEvents(selectElement, { withFocus: false, withInput: true, withChange: true, withBlur: true });
 
-    markFilled(selectElement, "dropdown");
+    const selectedAfter = selectElement.options?.[selectElement.selectedIndex];
+    if (!selectedAfter || selectedAfter.index !== matchedOption.index) return false;
+
+    markFilled(selectElement, "dropdown", source);
     return true;
   } catch (error) {
     console.warn("[FastApply] fillDropdown failed:", error);
@@ -574,7 +975,10 @@ const fillDropdown = (selectElement, targetValue) => {
   }
 };
 
-const fillRadio = (radioNodeList, targetText) => {
+const fillRadio = (radioNodeList, targetText, options = {}) => {
+  const source = options.source === "agent" ? "agent" : "deterministic";
+  const force = options.force === true;
+  const exactOnly = options.exact === true || source === "agent";
   const normalizedTarget = normalizeValue(targetText);
 
   if (!radioNodeList || radioNodeList.length === 0 || !normalizedTarget) return false;
@@ -582,34 +986,53 @@ const fillRadio = (radioNodeList, targetText) => {
   try {
     const radios = Array.from(radioNodeList);
 
+    if (!force && radios.some(radio => {
+      return isChoiceChecked(radio) || isProtectedFromDeterministicFill(radio);
+    })) {
+      return false;
+    }
+
     const exactRadio = radios.find(radio => {
       return radio &&
         !radio.disabled &&
-        normalizeText(getLabelText(radio)) === normalizeText(normalizedTarget);
+        radio.getAttribute?.("aria-disabled") !== "true" &&
+        normalizeText(getOptionLabel(radio)) === normalizeText(normalizedTarget);
     });
 
-    const semanticRadios = exactRadio
-      ? [exactRadio]
-      : radios.filter(radio => {
-          return radio &&
-            !radio.disabled &&
-            smartMatch(getLabelText(radio), normalizedTarget);
-        });
+    const semanticRadio = exactRadio || (exactOnly ? null : findBestSemanticMatch(
+      radios.filter(radio => {
+        return radio &&
+          !radio.disabled &&
+          radio.getAttribute?.("aria-disabled") !== "true";
+      }),
+      normalizedTarget,
+      getOptionLabel
+    ));
+    const semanticRadios = semanticRadio ? [semanticRadio] : [];
 
     if (semanticRadios.length !== 1) return false;
 
     for (const radio of semanticRadios) {
-      if (!radio || radio.disabled) continue;
-      if (radio.dataset.fa_filled === "true") continue;
+      if (
+        !radio ||
+        radio.disabled ||
+        radio.getAttribute?.("aria-disabled") === "true"
+      ) continue;
+      if (!force && radio.dataset.fa_filled === "true") continue;
 
-      const label = getLabelText(radio);
+      const label = getOptionLabel(radio);
 
-      if (smartMatch(label, normalizedTarget)) {
-        if (!radio.checked) {
+      if (
+        normalizeText(label) === normalizeText(normalizedTarget) ||
+        (!exactOnly && smartMatch(label, normalizedTarget))
+      ) {
+        if (!isChoiceChecked(radio)) {
           radio.focus?.();
           radio.click();
           radio.dispatchEvent(new Event("change", { bubbles: true }));
         }
+
+        if (!isChoiceChecked(radio)) continue;
 
         const wrap = radio.closest("label, [role='radio'], div, span") || radio.parentElement;
         if (wrap) {
@@ -623,6 +1046,7 @@ const fillRadio = (radioNodeList, targetText) => {
         radios.forEach((r) => {
           r.dataset.fa_filled = "true";
           r.dataset.fa_fill_type = "radio";
+          setValueOwner(r, source);
         });
 
         return true;
@@ -635,7 +1059,10 @@ const fillRadio = (radioNodeList, targetText) => {
   return false;
 };
 
-const fillCheckbox = (checkboxNodeList, targetText) => {
+const fillCheckbox = (checkboxNodeList, targetText, options = {}) => {
+  const source = options.source === "agent" ? "agent" : "deterministic";
+  const force = options.force === true;
+  const exactOnly = options.exact === true || source === "agent";
   const normalizedTarget = normalizeValue(targetText);
 
   if (!checkboxNodeList || checkboxNodeList.length === 0 || !normalizedTarget) return false;
@@ -645,34 +1072,53 @@ const fillCheckbox = (checkboxNodeList, targetText) => {
   try {
     const checkboxes = Array.from(checkboxNodeList);
 
+    if (!force && checkboxes.some(checkbox => {
+      return isChoiceChecked(checkbox) || isProtectedFromDeterministicFill(checkbox);
+    })) {
+      return false;
+    }
+
     const exactCheckbox = checkboxes.find(checkbox => {
       return checkbox &&
         !checkbox.disabled &&
-        normalizeText(getLabelText(checkbox)) === normalizeText(normalizedTarget);
+        checkbox.getAttribute?.("aria-disabled") !== "true" &&
+        normalizeText(getOptionLabel(checkbox)) === normalizeText(normalizedTarget);
     });
 
-    const semanticCheckboxes = exactCheckbox
-      ? [exactCheckbox]
-      : checkboxes.filter(checkbox => {
-          return checkbox &&
-            !checkbox.disabled &&
-            smartMatch(getLabelText(checkbox), normalizedTarget);
-        });
+    const semanticCheckbox = exactCheckbox || (exactOnly ? null : findBestSemanticMatch(
+      checkboxes.filter(checkbox => {
+        return checkbox &&
+          !checkbox.disabled &&
+          checkbox.getAttribute?.("aria-disabled") !== "true";
+      }),
+      normalizedTarget,
+      getOptionLabel
+    ));
+    const semanticCheckboxes = semanticCheckbox ? [semanticCheckbox] : [];
 
     if (semanticCheckboxes.length !== 1) return false;
 
     for (const cb of semanticCheckboxes) {
-      if (!cb || cb.disabled) continue;
-      if (cb.dataset.fa_filled === "true") continue;
+      if (
+        !cb ||
+        cb.disabled ||
+        cb.getAttribute?.("aria-disabled") === "true"
+      ) continue;
+      if (!force && cb.dataset.fa_filled === "true") continue;
 
-      const label = getLabelText(cb);
+      const label = getOptionLabel(cb);
 
-      if (smartMatch(label, normalizedTarget)) {
-        if (!cb.checked) {
+      if (
+        normalizeText(label) === normalizeText(normalizedTarget) ||
+        (!exactOnly && smartMatch(label, normalizedTarget))
+      ) {
+        if (!isChoiceChecked(cb)) {
           cb.focus?.();
           cb.click();
           cb.dispatchEvent(new Event("change", { bubbles: true }));
         }
+
+        if (!isChoiceChecked(cb)) continue;
 
         const wrap = cb.closest("label, [role='checkbox'], div, span") || cb.parentElement;
         if (wrap) {
@@ -685,6 +1131,7 @@ const fillCheckbox = (checkboxNodeList, targetText) => {
 
         cb.dataset.fa_filled = "true";
         cb.dataset.fa_fill_type = "checkbox";
+        setValueOwner(cb, source);
         clickedAnything = true;
       }
     }
@@ -725,6 +1172,45 @@ const isElementVisible = element => {
   const rect = element.getBoundingClientRect();
 
   return rect.width > 0 && rect.height > 0;
+};
+
+const getElementCurrentValue = element => {
+  if (!element) return "";
+  if (element.matches?.('[contenteditable="true"]')) {
+    return normalizeValue(element.innerText);
+  }
+  return normalizeValue(element.value);
+};
+
+const prepareValueForElement = (element, value) => {
+  const label = normalizeText(
+    `${element?.getAttribute?.("type") || ""} ${getLabelText(element)}`
+  );
+
+  if (
+    element?.getAttribute?.("type") === "url" ||
+    /\b(url|website|portfolio|linkedin|github|twitter)\b/.test(label)
+  ) {
+    return ensureHttpUrl(value);
+  }
+
+  if (
+    element?.getAttribute?.("type") === "tel" ||
+    /\b(phone|telephone|mobile)\b/.test(label)
+  ) {
+    const workdayPhoneFormatter =
+      window.WorkdayEngine?.formatWorkdayNationalPhone;
+    if (typeof workdayPhoneFormatter === "function") {
+      const country =
+        window.WorkdayEngine?.lastProfile?.contactInfo?.country || "";
+      const formatted = workdayPhoneFormatter(value, country);
+      if (formatted) return formatted;
+    }
+
+    return formatPhoneNumber(value);
+  }
+
+  return normalizeValue(value);
 };
 
 const getAgentQueryRoots = (root = document) => {
@@ -784,7 +1270,8 @@ const getOptionLabel = element => {
 
   if (element.id) {
     try {
-      const label = document.querySelector(
+      const queryRoot = element.getRootNode?.() || document;
+      const label = queryRoot.querySelector?.(
         `label[for="${CSS.escape(element.id)}"]`
       );
 
@@ -797,6 +1284,7 @@ const getOptionLabel = element => {
   return (
     getElementText(wrappingLabel) ||
     normalizeValue(element.getAttribute?.("aria-label")) ||
+    getElementText(element) ||
     normalizeValue(element.value)
   );
 };
@@ -832,9 +1320,11 @@ const getGroupQuestionText = elements => {
 
 const createAgentFieldId = (type, elements, label) => {
   const first = Array.from(elements || [])[0];
+  const pageKey = window.WorkdayEngine?.getPageKey?.() ||
+    window.location.pathname;
 
   const identity = [
-    window.location.pathname,
+    pageKey,
     type,
     first?.id || "",
     first?.name || "",
@@ -861,7 +1351,8 @@ const registerAgentField = ({
   label,
   options = [],
   required = false,
-  maxLength = null
+  maxLength = null,
+  currentValue = ""
 }) => {
   const normalizedElements = Array.from(elements || [])
     .filter(Boolean);
@@ -878,13 +1369,36 @@ const registerAgentField = ({
     element.dataset.fa_agent_field_id = fieldId;
   });
 
+  const owners = [...new Set(
+    normalizedElements.map(getValueOwner).filter(Boolean)
+  )];
+  const valueOwner = owners.includes("user")
+    ? "user"
+    : owners.includes("agent")
+      ? "agent"
+      : owners.length === 1
+        ? owners[0]
+        : "";
+  const primary = normalizedElements[0];
+  const nativeValid = typeof primary?.checkValidity === "function"
+    ? primary.checkValidity()
+    : true;
+  const ariaInvalid = primary?.getAttribute?.("aria-invalid") === "true";
+
   agentFieldRegistry.set(fieldId, {
     type,
     elements: normalizedElements,
     label,
     options,
     required,
-    maxLength
+    maxLength,
+    currentValue,
+    valueOwner,
+    validity: {
+      valid: nativeValid && !ariaInvalid,
+      ariaInvalid,
+      message: normalizeValue(primary?.validationMessage || "")
+    }
   });
 
   return {
@@ -893,86 +1407,64 @@ const registerAgentField = ({
     type,
     required,
     options,
-    currentValue: "",
-    maxLength
+    currentValue,
+    maxLength,
+    valueOwner,
+    validity: {
+      valid: nativeValid && !ariaInvalid,
+      ariaInvalid,
+      message: normalizeValue(primary?.validationMessage || "")
+    }
   };
 };
 
-const isStandardFieldEmpty = element => {
-  if (!element) return false;
-
+const getStandardCurrentValue = element => {
+  if (!element) return "";
   if (element.matches('[contenteditable="true"]')) {
-    return !normalizeValue(element.innerText);
+    return normalizeValue(element.innerText);
   }
-
   if (element.tagName === "SELECT") {
     const selected = element.options?.[element.selectedIndex];
-
-    return (
-      !selected ||
-      !normalizeValue(selected.value) ||
-      selected.disabled
-    );
+    return isPlaceholderOption(selected) ? "" : normalizeValue(selected.text);
   }
-
-  return !normalizeValue(element.value);
+  return normalizeValue(element.value);
 };
 
-const shouldCollectAgentField = element => {
-  if (!element || !isElementVisible(element)) return false;
-
-  if (
-    element.disabled ||
-    element.readOnly ||
-    element.dataset.fa_filled === "true" ||
-    element.dataset.fa_agent_processed === "true"
-  ) {
-    return false;
-  }
-
-  return isStandardFieldEmpty(element);
+const isChoiceChecked = element => {
+  return element?.checked === true ||
+    element?.getAttribute?.("aria-checked") === "true";
 };
 
-const collectUnresolvedFields = (root = document) => {
+const collectApplicationFields = (root = document, includeFilled = false) => {
+  agentFieldRegistry.clear();
   const fields = [];
 
-  const standardSelector = [
-    'input:not([type="hidden"])',
-    'input:not([type="radio"])',
-    'input:not([type="checkbox"])',
-    "select",
-    "textarea",
-    '[contenteditable="true"]'
-  ].join(",");
-
   const excludedInputTypes = new Set([
-    "hidden",
-    "radio",
-    "checkbox",
-    "file",
-    "password",
-    "submit",
-    "button",
-    "reset",
-    "image"
+    "hidden", "radio", "checkbox", "file", "password",
+    "submit", "button", "reset", "image"
   ]);
 
-  queryAgentElements(root, standardSelector).forEach(element => {
-    const inputType = normalizeText(
-      element.getAttribute?.("type") || ""
-    );
-
+  queryAgentElements(
+    root,
+    'input, select, textarea, [contenteditable="true"]'
+  ).forEach(element => {
+    const inputType = normalizeText(element.getAttribute?.("type") || "");
+    if (element.tagName === "INPUT" && excludedInputTypes.has(inputType)) return;
     if (
-      element.tagName === "INPUT" &&
-      excludedInputTypes.has(inputType)
-    ) {
-      return;
-    }
+      element.matches?.(
+        '[role="combobox"], [aria-haspopup="listbox"]'
+      )
+    ) return;
+    if (!isElementVisible(element) || element.disabled || element.readOnly) return;
 
-    if (!shouldCollectAgentField(element)) return;
+    const currentValue = getStandardCurrentValue(element);
+    if (!includeFilled && (
+      currentValue ||
+      element.dataset.fa_filled === "true" ||
+      element.dataset.fa_agent_processed === "true"
+    )) return;
 
     const label = normalizeValue(getLabelText(element));
-
     if (!label) return;
 
     const type = element.matches('[contenteditable="true"]')
@@ -982,139 +1474,105 @@ const collectUnresolvedFields = (root = document) => {
         : element.tagName === "TEXTAREA"
           ? "textarea"
           : inputType || "text";
-
     const options = element.tagName === "SELECT"
       ? Array.from(element.options || [])
-          .filter(option => {
-            return (
-              !option.disabled &&
-              normalizeValue(option.value) &&
-              normalizeValue(option.text)
-            );
-          })
+          .filter(option => !isPlaceholderOption(option))
           .map(option => normalizeValue(option.text))
+          .filter(Boolean)
       : [];
-
     const maxLengthValue = Number(element.maxLength);
-    const maxLength =
-      Number.isFinite(maxLengthValue) &&
-      maxLengthValue > 0
-        ? maxLengthValue
-        : null;
+    const maxLength = Number.isFinite(maxLengthValue) && maxLengthValue > 0
+      ? maxLengthValue
+      : null;
 
     const field = registerAgentField({
       type,
       elements: [element],
       label,
       options,
-      required:
-        element.required ||
-        element.getAttribute("aria-required") === "true",
-      maxLength
+      required: element.required || element.getAttribute("aria-required") === "true",
+      maxLength,
+      currentValue
     });
-
     if (field) fields.push(field);
   });
 
-  const radioGroups = new Map();
+  const collectChoiceGroups = (selector, type) => {
+    const groups = new Map();
 
-  queryAgentElements(root, 'input[type="radio"]').forEach(radio => {
-    if (
-      !isAgentChoiceVisible(radio) ||
-      radio.disabled ||
-      radio.dataset.fa_filled === "true" ||
-      radio.dataset.fa_agent_processed === "true"
-    ) {
-      return;
-    }
-
-    const key =
-      radio.name ||
-      radio.closest("fieldset")?.id ||
-      `radio_${hashAgentText(getGroupQuestionText([radio]))}`;
-
-    if (!radioGroups.has(key)) {
-      radioGroups.set(key, []);
-    }
-
-    radioGroups.get(key).push(radio);
-  });
-
-  radioGroups.forEach(radios => {
-    if (radios.some(radio => radio.checked)) return;
-
-    const label = normalizeValue(
-      getGroupQuestionText(radios)
-    );
-
-    const options = radios
-      .map(getOptionLabel)
-      .filter(Boolean);
-
-    if (!label || options.length === 0) return;
-
-    const field = registerAgentField({
-      type: "radio",
-      elements: radios,
-      label,
-      options,
-      required: radios.some(radio => radio.required)
-    });
-
-    if (field) fields.push(field);
-  });
-
-  const checkboxGroups = new Map();
-
-  queryAgentElements(root, 'input[type="checkbox"]')
-    .forEach(checkbox => {
+    queryAgentElements(root, selector).forEach(choice => {
       if (
-        !isAgentChoiceVisible(checkbox) ||
-        checkbox.disabled ||
-        checkbox.dataset.fa_filled === "true" ||
-        checkbox.dataset.fa_agent_processed === "true"
-      ) {
-        return;
-      }
+        !isAgentChoiceVisible(choice) ||
+        choice.disabled ||
+        choice.getAttribute?.("aria-disabled") === "true"
+      ) return;
 
-      const key = checkbox.name
-        ? `checkbox_name_${checkbox.name}`
-        : `checkbox_id_${checkbox.id || hashAgentText(getLabelText(checkbox))}`;
-
-      if (!checkboxGroups.has(key)) {
-        checkboxGroups.set(key, []);
-      }
-
-      checkboxGroups.get(key).push(checkbox);
+      const groupElement = choice.closest(
+        '[role="radiogroup"], fieldset, [role="group"], [class*="question"], [class*="form-group"]'
+      );
+      const key = choice.name
+        ? `${type}_name_${choice.name}`
+        : groupElement || `${type}_${choice.id || getGroupQuestionText([choice])}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(choice);
     });
 
-  checkboxGroups.forEach(checkboxes => {
-    if (checkboxes.some(checkbox => checkbox.checked)) return;
+    groups.forEach(choices => {
+      if (!includeFilled && choices.some(choice => {
+        return isChoiceChecked(choice) ||
+          choice.dataset.fa_filled === "true" ||
+          choice.dataset.fa_agent_processed === "true";
+      })) return;
 
-    const label = normalizeValue(
-      checkboxes.length === 1
-        ? getLabelText(checkboxes[0])
-        : getGroupQuestionText(checkboxes)
-    );
+      const label = normalizeValue(
+        choices.length === 1 && type === "checkbox"
+          ? getLabelText(choices[0])
+          : getGroupQuestionText(choices)
+      );
+      const options = choices.length === 1 && type === "checkbox"
+        ? ["Yes", "No"]
+        : choices.map(getOptionLabel).filter(Boolean);
+      if (!label || options.length === 0) return;
 
-    const options = checkboxes.length === 1
-      ? ["Yes", "No"]
-      : checkboxes.map(getOptionLabel).filter(Boolean);
+      const selectedOptions = choices
+        .filter(isChoiceChecked)
+        .map(getOptionLabel)
+        .filter(Boolean);
+      const currentValue = type === "checkbox" && choices.length === 1
+        ? isChoiceChecked(choices[0])
+        : type === "radio"
+          ? (selectedOptions[0] || "")
+          : selectedOptions;
 
-    if (!label) return;
-
-    const field = registerAgentField({
-      type: "checkbox",
-      elements: checkboxes,
-      label,
-      options,
-      required: checkboxes.some(checkbox => checkbox.required)
+      const field = registerAgentField({
+        type,
+        elements: choices,
+        label,
+        options,
+        required: choices.some(choice => {
+          return choice.required || choice.getAttribute("aria-required") === "true";
+        }),
+        currentValue
+      });
+      if (field) fields.push(field);
     });
+  };
 
-    if (field) fields.push(field);
-  });
+  collectChoiceGroups('input[type="radio"], [role="radio"]', "radio");
+  collectChoiceGroups(
+    'input[type="checkbox"], [role="checkbox"], [role="switch"]',
+    "checkbox"
+  );
 
   return fields;
+};
+
+const collectAuditableFields = (root = document) => {
+  return collectApplicationFields(root, true);
+};
+
+const collectUnresolvedFields = (root = document) => {
+  return collectApplicationFields(root, false);
 };
 
 const markAgentState = (
@@ -1139,7 +1597,7 @@ const markAgentState = (
   });
 };
 
-const fillContentEditable = (element, value) => {
+const fillContentEditable = (element, value, options = {}) => {
   const normalized = normalizeValue(value);
 
   if (!element || !normalized) return false;
@@ -1159,7 +1617,11 @@ const fillContentEditable = (element, value) => {
     );
     element.blur();
 
-    markFilled(element, "contenteditable");
+    markFilled(
+      element,
+      "contenteditable",
+      options.source === "agent" ? "agent" : "deterministic"
+    );
     return true;
   } catch (error) {
     console.warn(
@@ -1173,35 +1635,169 @@ const fillContentEditable = (element, value) => {
 
 const fillSingleCheckboxAnswer = (
   checkbox,
-  value
+  value,
+  options = {}
 ) => {
   const yesNo = classifyYesNo(value);
 
-  if (!checkbox || !yesNo) return false;
+  if (
+    !checkbox ||
+    !yesNo ||
+    checkbox.disabled ||
+    checkbox.getAttribute?.("aria-disabled") === "true"
+  ) return false;
 
   try {
-    if (yesNo === "yes" && !checkbox.checked) {
+    const shouldBeChecked = yesNo === "yes";
+    if (isChoiceChecked(checkbox) !== shouldBeChecked) {
       checkbox.click();
       checkbox.dispatchEvent(
         new Event("change", { bubbles: true })
       );
     }
 
-    if (yesNo === "no" && checkbox.checked) {
-      checkbox.click();
-      checkbox.dispatchEvent(
-        new Event("change", { bubbles: true })
-      );
-    }
+    if (isChoiceChecked(checkbox) !== shouldBeChecked) return false;
 
-    markFilled(checkbox, "checkbox");
+    markFilled(
+      checkbox,
+      "checkbox",
+      options.source === "agent" ? "agent" : "deterministic"
+    );
     return true;
   } catch (_) {
     return false;
   }
 };
 
-const fillAgentAnswer = answer => {
+const readRegisteredFieldValue = field => {
+  if (!field?.elements?.length) return "";
+  if (field.type === "select") {
+    return getStandardCurrentValue(field.elements[0]);
+  }
+  if (field.type === "radio") {
+    return field.elements
+      .filter(isChoiceChecked)
+      .map(getOptionLabel)[0] || "";
+  }
+  if (field.type === "checkbox") {
+    if (field.elements.length === 1) {
+      return isChoiceChecked(field.elements[0]);
+    }
+    return field.elements.filter(isChoiceChecked).map(getOptionLabel).filter(Boolean);
+  }
+  return getElementCurrentValue(field.elements[0]);
+};
+
+const releaseFailedAgentOwnership = elements => {
+  Array.from(elements || []).forEach(element => {
+    setValueOwner(element, "page");
+    delete element.dataset.fa_agent_filled;
+    delete element.dataset.fa_agent_source;
+    delete element.dataset.fa_agent_validated;
+    delete element.dataset.fa_filled;
+    delete element.dataset.fa_fill_type;
+  });
+};
+
+const comparableFieldValue = value => {
+  if (Array.isArray(value)) {
+    return JSON.stringify(value.map(comparableFieldValue).sort());
+  }
+  if (typeof value === "boolean") return String(value);
+  return normalizeValue(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+};
+
+const expectedRegisteredFieldValue = (field, value) => {
+  if (field?.type === "checkbox" && field.elements?.length === 1) {
+    const yesNo = classifyYesNo(value);
+    if (yesNo === "yes") return true;
+    if (yesNo === "no") return false;
+  }
+
+  if (
+    !["select", "radio", "checkbox"].includes(field?.type) &&
+    field?.elements?.[0]
+  ) {
+    return prepareValueForElement(field.elements[0], value) || value;
+  }
+
+  return value;
+};
+
+const refreshRegisteredFieldElements = field => {
+  if (!field?.elements?.length) return false;
+  if (field.elements.every(element => element?.isConnected)) return true;
+
+  const originalElements = [...field.elements];
+  const first = originalElements[0];
+  const name = first?.getAttribute?.("name");
+
+  if (["radio", "checkbox"].includes(field.type) && name) {
+    try {
+      const choices = queryAgentElements(
+        document,
+        `input[name="${CSS.escape(name)}"]`
+      ).filter(element => {
+        return element.type === field.type && isElementVisible(element);
+      });
+      if (choices.length === originalElements.length) {
+        field.elements = choices;
+        return true;
+      }
+    } catch (_) {}
+  }
+
+  const resolveElement = original => {
+    if (original?.isConnected) return original;
+    if (original?.id) {
+      const byId = document.getElementById(original.id);
+      if (byId) return byId;
+    }
+
+    const automationId = original?.getAttribute?.("data-automation-id");
+    if (automationId) {
+      try {
+        const byAutomationId = document.querySelector(
+          `[data-automation-id="${CSS.escape(automationId)}"]`
+        );
+        if (byAutomationId) return byAutomationId;
+      } catch (_) {}
+    }
+
+    const originalName = original?.getAttribute?.("name");
+    if (originalName) {
+      try {
+        const candidates = queryAgentElements(
+          document,
+          `[name="${CSS.escape(originalName)}"]`
+        ).filter(candidate => {
+          return candidate.tagName === original.tagName &&
+            normalizeText(candidate.getAttribute?.("type") || "") ===
+              normalizeText(original.getAttribute?.("type") || "");
+        });
+        if (candidates.length === 1) return candidates[0];
+      } catch (_) {}
+    }
+
+    const candidates = queryAgentElements(
+      document,
+      'input:not([type="hidden"]), select, textarea, [contenteditable="true"]'
+    ).filter(candidate => {
+      return isElementVisible(candidate) &&
+        normalizeText(getLabelText(candidate)) === normalizeText(field.label);
+    });
+    return candidates.length === 1 ? candidates[0] : null;
+  };
+
+  const refreshed = originalElements.map(resolveElement);
+  if (refreshed.some(element => !element)) return false;
+  field.elements = refreshed;
+  return true;
+};
+
+const fillAgentAnswer = async answer => {
   const field = agentFieldRegistry.get(answer?.fieldId);
 
   if (!field) {
@@ -1211,6 +1807,38 @@ const fillAgentAnswer = answer => {
     };
   }
 
+  if (!refreshRegisteredFieldElements(field)) {
+    answer.action = "unresolved";
+    answer.value = "";
+    answer.requiresReview = true;
+    answer.reviewReason =
+      "The field was replaced or removed after the page audit.";
+    markAgentState(field.elements, "unresolved", answer.reviewReason);
+    return { filled: false, unresolved: true };
+  }
+
+  const liveOwners = [...new Set(
+    field.elements.map(getValueOwner).filter(Boolean)
+  )];
+  field.valueOwner = liveOwners.includes("user")
+    ? "user"
+    : liveOwners.includes("agent")
+      ? "agent"
+      : liveOwners.length === 1
+        ? liveOwners[0]
+        : field.valueOwner;
+
+  const primary = field.elements[0];
+  const ariaInvalid = primary?.getAttribute?.("aria-invalid") === "true";
+  field.validity = {
+    valid:
+      !ariaInvalid &&
+      (typeof primary?.checkValidity !== "function" || primary.checkValidity()),
+    ariaInvalid,
+    message: normalizeValue(primary?.validationMessage || "")
+  };
+
+  const liveValue = readRegisteredFieldValue(field);
   const value = answer?.value;
   const hasValue =
     Array.isArray(value)
@@ -1218,6 +1846,24 @@ const fillAgentAnswer = answer => {
       : normalizeValue(value).length > 0;
 
   if (!hasValue) {
+    if (
+      field.valueOwner === "user" &&
+      comparableFieldValue(liveValue) &&
+      field.validity?.valid !== false
+    ) {
+      answer.action = "keep";
+      answer.value = liveValue;
+      answer.source = "user";
+      answer.confidence = 1;
+      answer.requiresReview = false;
+      answer.reviewReason = "";
+      field.elements.forEach(element => {
+        element.dataset.fa_agent_validated = "true";
+      });
+      markAgentState(field.elements, "filled");
+      return { filled: true, unresolved: false, kept: true };
+    }
+
     markAgentState(
       field.elements,
       "unresolved",
@@ -1231,17 +1877,62 @@ const fillAgentAnswer = answer => {
     };
   }
 
+  const expectedValue = expectedRegisteredFieldValue(field, value);
+  if (
+    comparableFieldValue(liveValue) !==
+    comparableFieldValue(field.currentValue)
+  ) {
+    answer.action = "conflict";
+    answer.value = "";
+    answer.requiresReview = true;
+    answer.reviewReason =
+      "The field changed after the scan, so FastApply preserved the newer value.";
+    markAgentState(field.elements, "review", answer.reviewReason);
+    return { filled: false, unresolved: true, conflict: true };
+  }
+
+  if (comparableFieldValue(liveValue) === comparableFieldValue(expectedValue)) {
+    answer.action = "keep";
+    field.elements.forEach(element => {
+      element.dataset.fa_agent_validated = "true";
+    });
+    markAgentState(field.elements, answer.requiresReview ? "review" : "filled");
+    return { filled: true, unresolved: false, kept: true };
+  }
+
+  if (
+    comparableFieldValue(liveValue) &&
+    field.valueOwner === "user"
+  ) {
+    answer.action = "conflict";
+    answer.value = "";
+    answer.requiresReview = true;
+    answer.reviewReason =
+      "FastApply found a different answer but preserved the manually entered value.";
+    markAgentState(field.elements, "review", answer.reviewReason);
+    return { filled: false, unresolved: true, conflict: true };
+  }
+
+  answer.action = comparableFieldValue(liveValue) ? "replace" : "fill";
+
   let filled = false;
 
   if (field.type === "select") {
-    filled = fillDropdown(field.elements[0], value);
+    filled = fillDropdown(field.elements[0], value, {
+      force: true,
+      source: "agent"
+    });
   } else if (field.type === "radio") {
-    filled = fillRadio(field.elements, value);
+    filled = fillRadio(field.elements, value, {
+      force: true,
+      source: "agent"
+    });
   } else if (field.type === "checkbox") {
     if (field.elements.length === 1) {
       filled = fillSingleCheckboxAnswer(
         field.elements[0],
-        value
+        value,
+        { source: "agent" }
       );
     } else {
       const targetValues = Array.isArray(value)
@@ -1250,9 +1941,21 @@ const fillAgentAnswer = answer => {
             .split(/[;,|]/)
             .map(item => item.trim())
             .filter(Boolean);
+      const targetKeys = new Set(targetValues.map(normalizeText));
 
-      filled = targetValues.some(target => {
-        return fillCheckbox(field.elements, target);
+      field.elements.forEach(checkbox => {
+        const optionKey = normalizeText(getOptionLabel(checkbox));
+        if (isChoiceChecked(checkbox) && !targetKeys.has(optionKey)) {
+          checkbox.click();
+          checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      });
+
+      filled = targetValues.length > 0 && targetValues.every(target => {
+        return fillCheckbox(field.elements, target, {
+          force: true,
+          source: "agent"
+        });
       });
     }
   } else if (
@@ -1260,13 +1963,18 @@ const fillAgentAnswer = answer => {
   ) {
     filled = fillContentEditable(
       field.elements[0],
-      value
+      value,
+      { source: "agent" }
     );
   } else {
-    filled = fillField(field.elements[0], value);
+    filled = fillField(field.elements[0], value, {
+      force: true,
+      source: "agent"
+    });
   }
 
   if (!filled) {
+    releaseFailedAgentOwnership(field.elements);
     answer.value = "";
     answer.requiresReview = true;
     answer.reviewReason =
@@ -1279,6 +1987,35 @@ const fillAgentAnswer = answer => {
       answer.reviewReason
     );
 
+    return {
+      filled: false,
+      unresolved: true
+    };
+  }
+
+  // React-controlled ATS forms can replace or format an input after its
+  // change event. Resolve the live node and verify only after that update has
+  // had time to settle, otherwise later answers use a stale page snapshot.
+  await new Promise(resolve => window.setTimeout(resolve, 140));
+  if (!refreshRegisteredFieldElements(field)) {
+    answer.value = "";
+    answer.requiresReview = true;
+    answer.reviewReason =
+      "The page replaced the field before its answer could be verified.";
+    return { filled: false, unresolved: true };
+  }
+
+  const retainedValue = readRegisteredFieldValue(field);
+  if (
+    comparableFieldValue(retainedValue) !==
+    comparableFieldValue(expectedValue)
+  ) {
+    releaseFailedAgentOwnership(field.elements);
+    answer.value = "";
+    answer.requiresReview = true;
+    answer.reviewReason =
+      "The page did not retain the answer after it was applied.";
+    markAgentState(field.elements, "unresolved", answer.reviewReason);
     return {
       filled: false,
       unresolved: true
@@ -1303,23 +2040,33 @@ const fillAgentAnswer = answer => {
 
   return {
     filled: true,
-    unresolved: false
+    unresolved: false,
+    kept: false
   };
 };
 
-const applyAgentAnswers = answers => {
+const applyAgentAnswers = async answers => {
   const summary = {
     answered: 0,
     reviewRequired: 0,
-    unresolved: 0
+    unresolved: 0,
+    kept: 0,
+    corrected: 0,
+    conflicts: 0
   };
 
-  (answers || []).forEach(answer => {
-    const result = fillAgentAnswer(answer);
+  for (const answer of answers || []) {
+    const result = await fillAgentAnswer(answer);
 
     if (result.filled) {
       summary.answered += 1;
     }
+
+    if (result.kept) summary.kept += 1;
+    if (result.filled && answer?.action === "replace") {
+      summary.corrected += 1;
+    }
+    if (result.conflict) summary.conflicts += 1;
 
     if (answer?.requiresReview) {
       summary.reviewRequired += 1;
@@ -1328,7 +2075,7 @@ const applyAgentAnswers = answers => {
     if (result.unresolved) {
       summary.unresolved += 1;
     }
-  });
+  }
 
   return summary;
 };
@@ -1337,7 +2084,14 @@ window.FastApplyUtils = {
   normalizeValue,
   escapeRegex,
   smartMatch,
+  getSemanticMatchScore,
+  findBestSemanticMatch,
   getLabelText,
+  getValueOwner,
+  setValueOwner,
+  isProtectedFromDeterministicFill,
+  ensureHttpUrl,
+  formatPhoneNumber,
   fillField,
   fillAutocomplete,
   fillDropdown,
@@ -1345,6 +2099,7 @@ window.FastApplyUtils = {
   fillCheckbox,
   getAgentQueryRoots,
   queryAgentElements,
+  collectAuditableFields,
   collectUnresolvedFields,
   applyAgentAnswers
 };

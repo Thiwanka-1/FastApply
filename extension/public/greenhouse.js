@@ -9,6 +9,22 @@ const fillReactDropdown = (fieldWrapper, targetValue) => {
 
   const nativeSelect = fieldWrapper.querySelector('select');
   if (nativeSelect) {
+    const selectedBefore = nativeSelect.options?.[nativeSelect.selectedIndex];
+    if (
+      selectedBefore &&
+      !selectedBefore.disabled &&
+      cleanGreenhouseText(selectedBefore.value)
+    ) {
+      // Preserve any real page/user selection. Returning "filled" here would
+      // make the caller exit the whole field loop and repeatedly stop on this
+      // same dropdown during every bounded retry.
+      return false;
+    }
+    if (
+      window.FastApplyUtils.isProtectedFromDeterministicFill?.(nativeSelect) ||
+      window.FastApplyUtils.isProtectedFromDeterministicFill?.(fieldWrapper)
+    ) return false;
+
     const availableOptions = Array.from(nativeSelect.options || [])
       .filter(option => !option.disabled && option.value)
       .map(option => option.text.trim())
@@ -40,6 +56,7 @@ const fillReactDropdown = (fieldWrapper, targetValue) => {
     if (!verified) return false;
 
     fieldWrapper.dataset.fa_filled = "true";
+    window.FastApplyUtils.setValueOwner?.(nativeSelect, "deterministic");
     fieldWrapper.style.border = '2px solid #8b5cf6';
     return true;
   }
@@ -108,7 +125,10 @@ const handleGreenhouseCustoms = (profile) => {
       return false;
     };
 
-    if (questionText.includes('based in the usa') || questionText.includes('based in the us.')) {
+    if (
+      (questionText.includes('based in the usa') || questionText.includes('based in the us.')) &&
+      cInfo.country
+    ) {
       const country = (cInfo.country || "").toLowerCase();
       const isUS = country === 'us' || country === 'usa' || country === 'united states' || country === 'america';
       if (tryDropdown(isUS ? "Yes" : "No")) return true; 
@@ -126,8 +146,12 @@ const handleGreenhouseCustoms = (profile) => {
       if (eeo.optOut) {
         if (tryDropdown("decline")) return true;
       } else if (eeo.ethnicity && eeo.ethnicity.trim() !== "") {
-        const isHisp = eeo.ethnicity.toLowerCase().includes('hispanic') || eeo.ethnicity.toLowerCase().includes('latino') || eeo.ethnicity.toLowerCase().includes('latinx');
-        if (tryDropdown(isHisp ? "Yes" : "No")) return true;
+        const ethnicity = eeo.ethnicity.toLowerCase();
+        const explicitlyNotHispanic = /\b(not|non)[\s-]+(hispanic|latino|latina|latinx)\b/.test(ethnicity);
+        const explicitlyHispanic = !explicitlyNotHispanic &&
+          /\b(hispanic|latino|latina|latinx)\b/.test(ethnicity);
+        if (explicitlyNotHispanic && tryDropdown("No")) return true;
+        if (explicitlyHispanic && tryDropdown("Yes")) return true;
       }
     }
     else if ((questionText.includes('gender') || questionText.includes('sex') || questionText.includes('identify as')) && !questionText.includes('transgender') && !questionText.includes('sexual orientation') && !questionText.includes('ethnicity') && !questionText.includes('race') && !questionText.includes('hispanic')) {
@@ -195,7 +219,9 @@ const attemptAutofill = (profile) => {
   if (window.FastApplyUtils.fillField(phoneInput, cInfo.phone)) filledAnything = true;
 
   if (locationInput && cInfo.city && locationInput.dataset.fa_filled !== "true") {
-    const locString = `${cInfo.city}, ${cInfo.country || ''}`.trim();
+    const locString = [cInfo.city, cInfo.state, cInfo.country]
+      .filter(Boolean)
+      .join(", ");
     if (window.FastApplyUtils.fillAutocomplete(locationInput, hiddenLocationInput, locString)) filledAnything = true;
   }
 
@@ -756,7 +782,31 @@ const getGreenhouseCurrentValue = (
       .replace(/[×x]\s*$/i, "")
       .trim();
 
-  return cleanedTriggerText;
+  return /^(one|select one|choose|choose one|please select)$/i.test(cleanedTriggerText)
+    ? ""
+    : cleanedTriggerText;
+};
+
+const getGreenhouseSelectedValues = wrapper => {
+  const control = getGreenhouseControl(wrapper);
+
+  if (control.nativeSelect) {
+    return Array.from(control.nativeSelect.selectedOptions || [])
+      .filter(option => cleanGreenhouseText(option.value))
+      .map(option => cleanGreenhouseText(option.text));
+  }
+
+  return [...new Set(
+    Array.from(wrapper.querySelectorAll([
+      '[class*="-singleValue"]',
+      '[class*="-multiValue"]',
+      '[class*="single-value"]',
+      '[class*="multi-value"]',
+      '[data-testid*="selected"]'
+    ].join(",")))
+      .map(node => cleanGreenhouseText(node.innerText || node.textContent))
+      .filter(Boolean)
+  )];
 };
 
 const getGreenhouseDropdownWrappers =
@@ -806,6 +856,18 @@ const getGreenhouseDropdownWrappers =
 
     return [...wrappers];
   };
+
+const getGreenhouseWrapperDepth = element => {
+  let depth = 0;
+  let current = element;
+
+  while (current?.parentElement) {
+    depth += 1;
+    current = current.parentElement;
+  }
+
+  return depth;
+};
 
 const setGreenhouseControlsProcessed = (
   wrapper,
@@ -897,92 +959,9 @@ const markGreenhouseAgentState = (
   } catch (_) {}
 };
 
-const getGreenhouseWordSet = value => {
-  return new Set(
-    normalizeGreenhouseText(value)
-      .split(" ")
-      .filter(word => {
-        return (
-          word.length > 1 &&
-          ![
-            "a",
-            "an",
-            "the",
-            "i",
-            "am",
-            "as",
-            "of",
-            "to",
-            "in",
-            "and",
-            "or",
-            "have",
-            "has",
-            "my"
-          ].includes(word)
-        );
-      })
-  );
-};
-
-const countGreenhouseOverlap = (
-  first,
-  second
-) => {
-  const firstWords =
-    getGreenhouseWordSet(first);
-
-  const secondWords =
-    getGreenhouseWordSet(second);
-
-  let overlap = 0;
-
-  firstWords.forEach(word => {
-    if (secondWords.has(word)) {
-      overlap += 1;
-    }
-  });
-
-  return overlap;
-};
-
-const classifyGreenhouseYesNo =
-  value => {
-    const normalized =
-      normalizeGreenhouseText(value);
-
-    if (!normalized) return "";
-
-    if (
-      /\bnot a veteran\b|\bhave not served\b|\bnot protected veteran\b|\bdo not\b|\bdont\b|\bno\b|\bfalse\b/.test(
-        normalized
-      )
-    ) {
-      return "no";
-    }
-
-    if (
-      /\byes\b|\btrue\b|\bprotected veteran\b|\bi am a veteran\b/.test(
-        normalized
-      )
-    ) {
-      return "yes";
-    }
-
-    return "";
-  };
-
-const isGreenhouseDeclineValue =
-  value => {
-    return /\bdecline\b|\bprefer not\b|\bdont wish\b|\bdo not wish\b|\bchoose not\b/.test(
-      normalizeGreenhouseText(value)
-    );
-  };
-
 const resolveGreenhouseOption = (
   value,
-  options,
-  label
+  options
 ) => {
     const availableOptions =
       Array.isArray(options)
@@ -1008,153 +987,10 @@ const resolveGreenhouseOption = (
         );
       });
 
-    if (exactMatch) return exactMatch;
-
-    if (
-      isGreenhouseDeclineValue(value)
-    ) {
-      const declineOption =
-        availableOptions.find(option => {
-          return (
-            /\bdecline\b|\bprefer not\b|\bdont wish\b|\bdo not wish\b/.test(
-              normalizeGreenhouseText(
-                option
-              )
-            )
-          );
-        });
-
-      if (declineOption) {
-        return declineOption;
-      }
-    }
-
-    const normalizedLabel =
-      normalizeGreenhouseText(label);
-
-    const yesNo =
-      classifyGreenhouseYesNo(value);
-
-    if (yesNo) {
-      const yesNoOptions =
-        availableOptions.filter(option => {
-          const normalizedOption =
-            normalizeGreenhouseText(
-              option
-            );
-
-          if (yesNo === "yes") {
-            return (
-              normalizedOption === "yes" ||
-              normalizedOption.startsWith(
-                "yes "
-              ) ||
-              /\bi am a veteran\b/.test(
-                normalizedOption
-              )
-            );
-          }
-
-          return (
-            normalizedOption === "no" ||
-            normalizedOption.startsWith(
-              "no "
-            ) ||
-            /\bnot a veteran\b/.test(
-              normalizedOption
-            )
-          );
-        });
-
-      if (
-        yesNoOptions.length === 1
-      ) {
-        return yesNoOptions[0];
-      }
-
-      if (
-        normalizedLabel.includes(
-          "veteran"
-        )
-      ) {
-        const veteranOption =
-          yesNoOptions.find(option => {
-            return normalizeGreenhouseText(
-              option
-            ).includes("veteran");
-          });
-
-        if (veteranOption) {
-          return veteranOption;
-        }
-      }
-    }
-
-    const containedMatches =
-      availableOptions.filter(option => {
-        const normalizedOption =
-          normalizeGreenhouseText(
-            option
-          );
-
-        return (
-          normalizedOption.includes(
-            normalizedValue
-          ) ||
-          normalizedValue.includes(
-            normalizedOption
-          )
-        );
-      });
-
-    if (
-      containedMatches.length === 1
-    ) {
-      return containedMatches[0];
-    }
-
-    const scoredOptions =
-      availableOptions
-        .map(option => ({
-          option,
-          score:
-            countGreenhouseOverlap(
-              value,
-              option
-            )
-        }))
-        .filter(item => {
-          return item.score > 0;
-        })
-        .sort((first, second) => {
-          return second.score - first.score;
-        });
-
-    if (scoredOptions.length === 0) {
-      return "";
-    }
-
-    const best =
-      scoredOptions[0];
-
-    const second =
-      scoredOptions[1];
-
-    /*
-     * Never guess when two options have the same
-     * semantic score. For example, a stored value
-     * of "Asian (East / South)" cannot safely choose
-     * between separate East Asian and South Asian
-     * form options without more specific evidence.
-     */
-    if (
-      second &&
-      second.score === best.score
-    ) {
-      return "";
-    }
-
-    return best.option;
+    return exactMatch || window.FastApplyUtils.findBestSemanticMatch?.(
+      availableOptions,
+      value
+    ) || "";
   };
 
 const findRenderedGreenhouseOption = (
@@ -1246,7 +1082,8 @@ const findVirtualizedGreenhouseOption = async (
 const fillGreenhouseAgentDropdown =
   async (
     wrapper,
-    targetValue
+    targetValue,
+    settings = {}
   ) => {
     const target =
       cleanGreenhouseText(
@@ -1261,11 +1098,33 @@ const fillGreenhouseAgentDropdown =
       getGreenhouseControl(wrapper);
 
     if (control.nativeSelect) {
+      if (settings.multiple === true && control.nativeSelect.multiple) {
+        const option = Array.from(control.nativeSelect.options || []).find(item => {
+          return normalizeGreenhouseText(item.text) === normalizeGreenhouseText(target);
+        });
+        if (!option || option.disabled) return false;
+        option.selected = true;
+        control.nativeSelect.dispatchEvent(new Event("input", { bubbles: true }));
+        control.nativeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+        const retained = Array.from(control.nativeSelect.selectedOptions || []).some(item => {
+          return normalizeGreenhouseText(item.text) === normalizeGreenhouseText(target);
+        });
+        if (retained) {
+          window.FastApplyUtils.setValueOwner?.(control.nativeSelect, "agent");
+        }
+        return retained;
+      }
+
       const filled =
         window.FastApplyUtils
           .fillDropdown(
             control.nativeSelect,
-            target
+            target,
+            {
+              force: true,
+              source: "agent",
+              exact: true
+            }
           );
 
       if (!filled) return false;
@@ -1309,6 +1168,16 @@ const fillGreenhouseAgentDropdown =
       return false;
     }
 
+    matchedOption.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    if (typeof PointerEvent === "function") {
+      matchedOption.dispatchEvent(new PointerEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        pointerType: "mouse",
+        isPrimary: true
+      }));
+    }
+
     matchedOption.dispatchEvent(
       new MouseEvent("mousedown", {
         bubbles: true,
@@ -1325,6 +1194,15 @@ const fillGreenhouseAgentDropdown =
       })
     );
 
+    if (typeof PointerEvent === "function") {
+      matchedOption.dispatchEvent(new PointerEvent("pointerup", {
+        bubbles: true,
+        cancelable: true,
+        pointerType: "mouse",
+        isPrimary: true
+      }));
+    }
+
     matchedOption.click();
 
     await waitForGreenhouse(180);
@@ -1333,19 +1211,16 @@ const fillGreenhouseAgentDropdown =
       getGreenhouseCurrentValue(
         wrapper
       );
+    const stillExpanded =
+      control.input?.getAttribute("aria-expanded") === "true" ||
+      control.trigger?.getAttribute("aria-expanded") === "true";
 
-    const verified =
-      normalizeGreenhouseText(
-        currentValue
-      ).includes(
-        normalizeGreenhouseText(
-          target
-        )
-      ) ||
-      window.FastApplyUtils.smartMatch(
-        currentValue,
-        target
-      );
+    const verified = settings.multiple === true
+      ? getGreenhouseSelectedValues(wrapper).some(value => {
+          return normalizeGreenhouseText(value) === normalizeGreenhouseText(target);
+        })
+      : !stillExpanded &&
+        normalizeGreenhouseText(currentValue) === normalizeGreenhouseText(target);
 
     if (!verified) return false;
 
@@ -1354,6 +1229,9 @@ const fillGreenhouseAgentDropdown =
 
     wrapper.dataset.fa_agent_filled =
       "true";
+
+    const ownerControl = control.nativeSelect || control.input || control.trigger || wrapper;
+    window.FastApplyUtils.setValueOwner?.(ownerControl, "agent");
 
     return true;
   };
@@ -1366,8 +1244,13 @@ const collectGreenhouseAgentFields =
     const processedWrappers = [];
     const customLabels = new Set();
 
-    const wrappers =
-      getGreenhouseDropdownWrappers();
+    const wrappers = getGreenhouseDropdownWrappers()
+      .sort((first, second) => {
+        return getGreenhouseWrapperDepth(second) -
+          getGreenhouseWrapperDepth(first);
+      });
+    const registeredControls = new Set();
+    const registeredControlKeys = new Set();
 
     /*
      * First register every real Greenhouse dropdown.
@@ -1375,11 +1258,10 @@ const collectGreenhouseAgentFields =
      * processed so the generic collector cannot add
      * the same control again as a text input.
      */
-    for (const wrapper of wrappers) {
+    for (let wrapperIndex = 0; wrapperIndex < wrappers.length; wrapperIndex += 1) {
+      const wrapper = wrappers[wrapperIndex];
       if (
-        !isGreenhouseVisible(wrapper) ||
-        wrapper.dataset.fa_filled ===
-          "true"
+        !isGreenhouseVisible(wrapper)
       ) {
         continue;
       }
@@ -1410,29 +1292,20 @@ const collectGreenhouseAgentFields =
         continue;
       }
 
-      const currentValue =
-        getGreenhouseCurrentValue(
-          wrapper,
-          control
-        );
-
-      if (currentValue) {
-        /*
-         * The visible Greenhouse control already has a
-         * selected value. Do not collect a hidden or
-         * internal search input as another empty field.
-         */
-        setGreenhouseControlsProcessed(
-          wrapper,
-          true
-        );
-
-        processedWrappers.push(
-          wrapper
-        );
-
-        continue;
-      }
+      const ownerControl = control.nativeSelect || control.input || control.trigger || wrapper;
+      const normalizedCustomLabel = normalizeGreenhouseText(label);
+      const controlKey = [
+        normalizedCustomLabel,
+        ownerControl.id || "",
+        ownerControl.getAttribute?.("name") || "",
+        ownerControl.getAttribute?.("aria-controls") || ""
+      ].join("|");
+      if (
+        registeredControls.has(ownerControl) ||
+        registeredControlKeys.has(controlKey)
+      ) continue;
+      registeredControls.add(ownerControl);
+      registeredControlKeys.add(controlKey);
 
       setGreenhouseControlsProcessed(
         wrapper,
@@ -1454,7 +1327,8 @@ const collectGreenhouseAgentFields =
         control.input?.id || "",
         control.input?.name || "",
         control.nativeSelect?.id || "",
-        control.nativeSelect?.name || ""
+        control.nativeSelect?.name || "",
+        wrapperIndex
       ].join("|");
 
       const fieldId =
@@ -1465,6 +1339,11 @@ const collectGreenhouseAgentFields =
           wrapper,
           label
         );
+      const currentValue = multiple
+        ? getGreenhouseSelectedValues(wrapper)
+        : getGreenhouseCurrentValue(wrapper, control);
+      const valueOwner = window.FastApplyUtils.getValueOwner?.(ownerControl) ||
+        (wrapper.dataset.fa_filled === "true" ? "deterministic" : "");
 
       wrapper.dataset.fa_agent_field_id =
         fieldId;
@@ -1475,14 +1354,15 @@ const collectGreenhouseAgentFields =
           wrapper,
           label,
           options,
-          multiple
+          multiple,
+          currentValue,
+          valueOwner,
+          ownerControl
         }
       );
 
       customLabels.add(
-        normalizeGreenhouseText(
-          label
-        )
+        normalizedCustomLabel
       );
 
       customFields.push({
@@ -1502,14 +1382,22 @@ const collectGreenhouseAgentFields =
             "aria-required"
           ) === "true",
         options,
-        currentValue: "",
-        maxLength: null
+        currentValue,
+        maxLength: null,
+        valueOwner,
+        validity: {
+          valid:
+            ownerControl.getAttribute?.("aria-invalid") !== "true" &&
+            (typeof ownerControl.checkValidity !== "function" || ownerControl.checkValidity()),
+          ariaInvalid: ownerControl.getAttribute?.("aria-invalid") === "true",
+          message: cleanGreenhouseText(ownerControl.validationMessage || "")
+        }
       });
     }
 
     const standardFields =
       window.FastApplyUtils
-        .collectUnresolvedFields()
+        .collectAuditableFields()
         .filter(field => {
           /*
            * Remove any remaining duplicate Greenhouse
@@ -1549,31 +1437,7 @@ const collectGreenhouseAgentFields =
       ...standardFields,
       ...customFields
     ].forEach(field => {
-      const identity = [
-        normalizeGreenhouseText(
-          field.label
-        ),
-        field.type
-      ].join("|");
-
-      const existing =
-        uniqueFields.get(identity);
-
-      /*
-       * Prefer the custom Greenhouse field because it
-       * contains the real dropdown options.
-       */
-      if (
-        !existing ||
-        field.fieldId.startsWith(
-          "fa_greenhouse_select_"
-        )
-      ) {
-        uniqueFields.set(
-          identity,
-          field
-        );
-      }
+      uniqueFields.set(field.fieldId, field);
     });
 
     return [
@@ -1594,6 +1458,69 @@ const hasGreenhouseAnswerValue =
     );
   };
 
+const comparableGreenhouseValue = value => {
+  if (Array.isArray(value)) {
+    return JSON.stringify(
+      value.map(normalizeGreenhouseText).filter(Boolean).sort()
+    );
+  }
+  return normalizeGreenhouseText(value);
+};
+
+const refreshGreenhouseAgentField = field => {
+  if (
+    field?.wrapper?.isConnected &&
+    field?.ownerControl?.isConnected
+  ) {
+    return true;
+  }
+
+  const expectedLabel = normalizeGreenhouseText(field?.label);
+  const wrapper = getGreenhouseDropdownWrappers()
+    .sort((first, second) => {
+      return getGreenhouseWrapperDepth(second) -
+        getGreenhouseWrapperDepth(first);
+    })
+    .find(candidate => {
+      if (!isGreenhouseVisible(candidate)) return false;
+      if (
+        normalizeGreenhouseText(getGreenhouseFieldLabel(candidate)) !==
+        expectedLabel
+      ) {
+        return false;
+      }
+
+      const control = getGreenhouseControl(candidate);
+      return Boolean(control.nativeSelect || control.input || control.trigger);
+    });
+
+  if (!wrapper) return false;
+
+  const control = getGreenhouseControl(wrapper);
+  const ownerControl = control.nativeSelect || control.input || control.trigger || wrapper;
+  field.wrapper = wrapper;
+  field.ownerControl = ownerControl;
+  field.valueOwner = window.FastApplyUtils.getValueOwner?.(ownerControl) ||
+    field.valueOwner;
+  return true;
+};
+
+const releaseFailedGreenhouseOwnership = field => {
+  if (!field) return;
+
+  const ownerControl = field.ownerControl || field.wrapper;
+  if (ownerControl) {
+    window.FastApplyUtils.setValueOwner?.(ownerControl, "page");
+    delete ownerControl.dataset.fa_agent_filled;
+    delete ownerControl.dataset.fa_filled;
+  }
+
+  if (field.wrapper) {
+    delete field.wrapper.dataset.fa_agent_filled;
+    delete field.wrapper.dataset.fa_filled;
+  }
+};
+
 const applyGreenhouseAgentAnswers =
   async answers => {
     const standardAnswers = [];
@@ -1601,7 +1528,10 @@ const applyGreenhouseAgentAnswers =
     const summary = {
       answered: 0,
       reviewRequired: 0,
-      unresolved: 0
+      unresolved: 0,
+      kept: 0,
+      corrected: 0,
+      conflicts: 0
     };
 
     for (const answer of answers || []) {
@@ -1615,11 +1545,67 @@ const applyGreenhouseAgentAnswers =
         continue;
       }
 
+      if (!refreshGreenhouseAgentField(customField)) {
+        answer.action = "unresolved";
+        answer.value = "";
+        answer.requiresReview = true;
+        answer.reviewReason =
+          "The Greenhouse field was replaced or removed after the page audit.";
+        summary.unresolved += 1;
+        continue;
+      }
+
+      customField.valueOwner = window.FastApplyUtils.getValueOwner?.(
+        customField.ownerControl
+      ) || customField.valueOwner;
+
+      const liveValue = customField.multiple
+        ? getGreenhouseSelectedValues(customField.wrapper)
+        : getGreenhouseCurrentValue(customField.wrapper);
+
+      if (
+        comparableGreenhouseValue(liveValue) !==
+        comparableGreenhouseValue(customField.currentValue)
+      ) {
+        answer.action = "conflict";
+        answer.value = "";
+        answer.requiresReview = true;
+        answer.reviewReason =
+          "The field changed after the audit, so FastApply preserved the newer value.";
+        markGreenhouseAgentState(customField.wrapper, "review", answer.reviewReason);
+        summary.unresolved += 1;
+        summary.conflicts += 1;
+        summary.reviewRequired += 1;
+        continue;
+      }
+
       if (
         !hasGreenhouseAnswerValue(
           answer?.value
         )
       ) {
+        const isValid = customField.ownerControl.getAttribute?.("aria-invalid") !== "true" &&
+          (typeof customField.ownerControl.checkValidity !== "function" ||
+            customField.ownerControl.checkValidity());
+
+        if (
+          customField.valueOwner === "user" &&
+          hasGreenhouseAnswerValue(liveValue) &&
+          isValid
+        ) {
+          answer.action = "keep";
+          answer.value = liveValue;
+          answer.source = "user";
+          answer.confidence = 1;
+          answer.requiresReview = false;
+          answer.reviewReason = "";
+          customField.ownerControl.dataset.fa_agent_validated = "true";
+          markGreenhouseAgentState(customField.wrapper, "filled");
+          summary.answered += 1;
+          summary.kept += 1;
+          continue;
+        }
+
         markGreenhouseAgentState(
           customField.wrapper,
           "unresolved",
@@ -1651,7 +1637,10 @@ const applyGreenhouseAgentAnswers =
       ];
 
       if (
-        matchedValues.length === 0
+        matchedValues.length === 0 ||
+        matchedValues.length !== new Set(
+          incomingValues.map(normalizeGreenhouseText).filter(Boolean)
+        ).size
       ) {
         const originalValue =
           cleanGreenhouseText(
@@ -1683,6 +1672,57 @@ const applyGreenhouseAgentAnswers =
         customField.multiple
           ? matchedValues
           : [matchedValues[0]];
+      const targetValue = customField.multiple ? valuesToApply : valuesToApply[0];
+
+      if (
+        comparableGreenhouseValue(liveValue) ===
+        comparableGreenhouseValue(targetValue)
+      ) {
+        answer.action = "keep";
+        customField.ownerControl.dataset.fa_agent_validated = "true";
+        markGreenhouseAgentState(
+          customField.wrapper,
+          answer.requiresReview ? "review" : "filled",
+          answer.reviewReason || ""
+        );
+        summary.answered += 1;
+        summary.kept += 1;
+        if (answer.requiresReview) summary.reviewRequired += 1;
+        continue;
+      }
+
+      if (
+        hasGreenhouseAnswerValue(liveValue) &&
+        customField.valueOwner === "user"
+      ) {
+        answer.action = "conflict";
+        answer.value = "";
+        answer.requiresReview = true;
+        answer.reviewReason =
+          "FastApply preserved the manually entered value.";
+        markGreenhouseAgentState(customField.wrapper, "review", answer.reviewReason);
+        summary.unresolved += 1;
+        summary.conflicts += 1;
+        summary.reviewRequired += 1;
+        continue;
+      }
+
+      answer.action = hasGreenhouseAnswerValue(liveValue) ? "replace" : "fill";
+
+      if (customField.multiple && hasGreenhouseAnswerValue(liveValue)) {
+        Array.from(customField.wrapper.querySelectorAll(
+          'button[aria-label^="Remove"], [aria-label^="Remove"][role="button"]'
+        )).filter(isGreenhouseVisible).forEach(button => button.click());
+        await waitForGreenhouse(180);
+        if (!refreshGreenhouseAgentField(customField)) {
+          answer.value = "";
+          answer.requiresReview = true;
+          answer.reviewReason =
+            "The Greenhouse field was replaced before its existing selections could be cleared.";
+          summary.unresolved += 1;
+          continue;
+        }
+      }
 
       let allFilled = true;
 
@@ -1690,10 +1730,16 @@ const applyGreenhouseAgentAnswers =
         const matchedValue of
           valuesToApply
       ) {
+        if (!refreshGreenhouseAgentField(customField)) {
+          allFilled = false;
+          break;
+        }
+
         const filled =
           await fillGreenhouseAgentDropdown(
             customField.wrapper,
-            matchedValue
+            matchedValue,
+            { multiple: customField.multiple }
           );
 
         if (!filled) {
@@ -1703,6 +1749,8 @@ const applyGreenhouseAgentAnswers =
       }
 
       if (!allFilled) {
+        refreshGreenhouseAgentField(customField);
+        releaseFailedGreenhouseOwnership(customField);
         answer.value = "";
         answer.requiresReview = true;
         answer.reviewReason =
@@ -1729,6 +1777,9 @@ const applyGreenhouseAgentAnswers =
           : valuesToApply[0];
 
       summary.answered += 1;
+      if (answer.action === "replace") {
+        summary.corrected += 1;
+      }
 
       if (
         answer.requiresReview === true
@@ -1746,7 +1797,7 @@ const applyGreenhouseAgentAnswers =
     }
 
     const standardSummary =
-      window.FastApplyUtils
+      await window.FastApplyUtils
         .applyAgentAnswers(
           standardAnswers
         );
@@ -1762,7 +1813,19 @@ const applyGreenhouseAgentAnswers =
 
       unresolved:
         summary.unresolved +
-        standardSummary.unresolved
+        standardSummary.unresolved,
+
+      kept:
+        summary.kept +
+        (standardSummary.kept || 0),
+
+      corrected:
+        summary.corrected +
+        (standardSummary.corrected || 0),
+
+      conflicts:
+        summary.conflicts +
+        (standardSummary.conflicts || 0)
     };
   };
 

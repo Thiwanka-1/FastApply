@@ -1388,10 +1388,11 @@ const recoverMissingCqfoFields = async ({
       modelOverride: model,
       maxTokensOverride: getPositiveInteger(
         process.env.HF_VISION_RECOVERY_MAX_TOKENS,
-        1800
+        3000
       ),
       reasoningEffortOverride:
-        process.env.HF_VISION_REASONING || 'low',
+        process.env.HF_VISION_RECOVERY_REASONING || 'none',
+      disableThinkingOverride: true,
       temperature: 0,
       responseSchema: templateToJsonSchema(prompts.outputTemplate),
       schemaName: name
@@ -1633,6 +1634,22 @@ const getGeneratedContent = (response) => {
   return '';
 };
 
+const getGeneratedReasoning = (response) => {
+  const reasoning = response.data?.choices?.[0]?.message?.reasoning_content;
+
+  if (typeof reasoning === 'string') return reasoning;
+
+  if (Array.isArray(reasoning)) {
+    return reasoning.map(item => item?.text || item?.content || '').join('');
+  }
+
+  return '';
+};
+
+const supportsGlmThinkingSwitch = (model) => {
+  return /(?:^|\/)glm[-_.]?4/i.test(String(model || ''));
+};
+
 const makeHuggingFaceRequest = async ({
   task,
   systemPrompt,
@@ -1642,6 +1659,7 @@ const makeHuggingFaceRequest = async ({
   modelOverride,
   maxTokensOverride,
   reasoningEffortOverride,
+  disableThinkingOverride = false,
   responseSchema,
   schemaName = 'result'
 }) => {
@@ -1669,9 +1687,15 @@ const makeHuggingFaceRequest = async ({
     ],
     temperature,
     max_tokens: maxTokens,
-    reasoning_effort: reasoningEffort,
+    reasoning_effort: disableThinkingOverride ? 'none' : reasoningEffort,
     stream: false
   };
+
+  if (disableThinkingOverride && supportsGlmThinkingSwitch(model)) {
+    payload.chat_template_kwargs = {
+      enable_thinking: false
+    };
+  }
 
   const config = {
     headers: {
@@ -1692,43 +1716,96 @@ const makeHuggingFaceRequest = async ({
     type: 'json_object'
   };
 
-  const sendRequest = async (responseFormat) => {
+  const sendRequest = async (responseFormat, requestPayload = payload) => {
     const requestBody = responseFormat
-      ? { ...payload, response_format: responseFormat }
-      : payload;
+      ? { ...requestPayload, response_format: responseFormat }
+      : requestPayload;
 
     return await axios.post(endpoint, requestBody, config);
   };
 
-  let response;
-
-  try {
+  const sendWithSupportedFormat = async (requestPayload) => {
     try {
-      response = await sendRequest(schemaFormat);
+      return await sendRequest(schemaFormat, requestPayload);
     } catch (error) {
       if (!responseFormatIsUnsupported(error)) throw error;
 
       console.warn(`Structured output unavailable for "${model}". Retrying with JSON mode.`);
 
       try {
-        response = await sendRequest({ type: 'json_object' });
+        return await sendRequest({ type: 'json_object' }, requestPayload);
       } catch (jsonError) {
         if (!responseFormatIsUnsupported(jsonError)) throw jsonError;
 
         console.warn(`JSON mode unavailable for "${model}". Retrying without response_format.`);
-        response = await sendRequest(null);
+        return await sendRequest(null, requestPayload);
       }
     }
+  };
+
+  let response;
+
+  try {
+    response = await sendWithSupportedFormat(payload);
   } catch (error) {
     throw createHuggingFaceError(error, model);
   }
 
-  const content = getGeneratedContent(response);
-  const finishReason = response.data?.choices?.[0]?.finish_reason;
+  let content = getGeneratedContent(response);
+  let finishReason = response.data?.choices?.[0]?.finish_reason;
+
+  if (!content && getGeneratedReasoning(response)) {
+    console.warn(
+      `Hugging Face model "${model}" returned reasoning without a final answer ` +
+      `for "${schemaName}". Retrying once with thinking disabled.`
+    );
+
+    const retryPayload = {
+      ...payload,
+      messages: [
+        {
+          role: 'system',
+          content:
+            `${systemPrompt}\n\nDo not provide analysis or reasoning. ` +
+            'Return the requested JSON object immediately.'
+        },
+        { role: 'user', content: userContent || userPrompt }
+      ],
+      reasoning_effort: 'none',
+      max_tokens: Math.max(
+        maxTokens,
+        getPositiveInteger(process.env.HF_REASONING_RETRY_MAX_TOKENS, 4500)
+      )
+    };
+
+    if (supportsGlmThinkingSwitch(model)) {
+      retryPayload.chat_template_kwargs = {
+        enable_thinking: false
+      };
+    }
+
+    try {
+      // JSON/schema response modes can make reasoning models spend their
+      // entire completion budget before emitting message.content. The retry
+      // is deliberately unstructured; the prompt still demands raw JSON and
+      // sanitizeLLMOutput validates it below.
+      response = await sendRequest(null, retryPayload);
+    } catch (error) {
+      throw createHuggingFaceError(error, model);
+    }
+
+    content = getGeneratedContent(response);
+    finishReason = response.data?.choices?.[0]?.finish_reason;
+  }
 
   if (!content) {
+    const reasoningTokens =
+      response.data?.usage?.completion_tokens_details?.reasoning_tokens;
+
     throw new Error(
-      `Hugging Face returned an unexpected response: ${JSON.stringify(response.data)}`
+      `Hugging Face model "${model}" returned no final answer for ` +
+      `"${schemaName}"${finishReason ? ` (finish reason: ${finishReason})` : ''}` +
+      `${Number.isFinite(reasoningTokens) ? ` after ${reasoningTokens} reasoning tokens` : ''}.`
     );
   }
 
@@ -1927,12 +2004,25 @@ export const generateFormAnswers = async ({
   fields
 }) => {
   const systemPrompt = `
-You are Agent 2, an evidence-based job-application form completion agent.
+You are Agent 2, an evidence-based job-application form audit and completion
+agent.
 
-You receive only fields that the browser's script-based autofill engine could
-not fill. You must attempt every supplied field, including simple fields such
-as name, email, telephone, address, Yes/No questions, radio fields, dropdowns,
-dates, salary questions and open-ended text questions.
+You receive every supported field visible on the current application page,
+including both empty fields and fields already completed by deterministic
+autofill, a previous agent run, the site, or the user. Audit every supplied
+field. Use currentValue, valueOwner and validity only as page-state evidence;
+the candidate profile and documents remain the source of truth for answers.
+
+For each field:
+
+1. If currentValue is correct and supported by candidate evidence, return the
+   same value exactly.
+2. If currentValue is empty, invalid or incorrect and candidate evidence
+   supports a correct value, return that correct value.
+3. If no candidate evidence supports an answer, return an empty string. Never
+   preserve or replace an unsupported factual answer merely because it is
+   already present.
+4. Return one answer object for every supplied field.
 
 EVIDENCE PRIORITY:
 
@@ -1963,8 +2053,17 @@ STRICT RULES:
    such as authorizedToWorkCanada or salaryMinimum.
 10. For resume, CQFO or cover-letter evidence, evidenceQuote must contain a
     short exact supporting phrase copied from that document.
-11. For radio, checkbox and select fields, return one of the provided options.
-12. Do not return an option that is not present in the field's options.
+11. For radio, checkbox and select fields, first determine the supported meaning
+    from the candidate evidence, then compare that meaning with every supplied
+    option. Return the complete exact wording of the single supplied option that
+    represents the same meaning. For checkbox groups and multi-select fields,
+    return an array containing only complete supplied option strings.
+12. Wording does not need to match the evidence literally, but meaning and
+    polarity must match. For example, evidence "Yes" may map to a longer
+    supplied affirmative option, and "BEng" may map to "Bachelor of
+    Engineering". Never map agree to do-not-agree, yes to no, or select a merely
+    related option. If more than one option is plausible, return an empty value
+    and require review.
 13. Country-specific questions must use country-specific evidence.
 14. Do not apply Canadian work-authorisation or sponsorship answers to a
     United States-specific question.
@@ -1972,11 +2071,19 @@ STRICT RULES:
 16. For an unknown country, leave country-specific answers empty unless an
     exact matching fact exists.
 17. Preserve factual numbers, dates, names, phone numbers and identifiers.
-18. Return one answer object for every supplied field.
+18. Treat validity.valid=false or validity.ariaInvalid=true as evidence that
+    the current page value cannot simply be preserved. Return an evidence-backed
+    corrected value or an empty value requiring review.
 19. Return raw JSON only.
 
 EXAMPLES:
 
+- A completed first-name field that matches personalInfo.firstName must be
+  returned unchanged.
+- A completed phone, URL, date or other field that is marked invalid must be
+  returned in a supported valid form when the underlying fact is available.
+- A completed field containing a deterministic value that conflicts with the
+  structured profile must be returned with the profile-supported correction.
 - A missed full-name field may be answered from personalInfo.
 - A missed email field may be answered from contactInfo.email.
 - A missed Canada authorisation field may use authorizedToWorkCanada.
@@ -1987,7 +2094,7 @@ EXAMPLES:
 
   const userPrompt = JSON.stringify({
     instruction:
-      'Answer every unresolved field using only supported candidate evidence.',
+      'Audit every field and return its supported correct value, whether the field is empty or already completed.',
     jobContext,
     candidateContext,
     fields

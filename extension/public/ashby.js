@@ -3,6 +3,12 @@ console.log("[FastApply] Ashby Engine Active.");
 
 const clickAshbyButton = (buttons, targetValue) => {
   if (!buttons || buttons.length === 0 || !targetValue) return false;
+  if (buttons.some(button => {
+    return window.FastApplyUtils.isProtectedFromDeterministicFill?.(button) ||
+      button.getAttribute("aria-pressed") === "true" ||
+      button.getAttribute("aria-selected") === "true" ||
+      /^(checked|selected|active)$/i.test(button.getAttribute("data-state") || "");
+  })) return false;
   const targetLower = targetValue.toLowerCase().trim();
   let clicked = false;
   
@@ -21,7 +27,10 @@ const clickAshbyButton = (buttons, targetValue) => {
   }
   
   if (clicked) {
-    buttons.forEach(b => b.dataset.fa_filled = "true"); 
+    buttons.forEach(b => {
+      b.dataset.fa_filled = "true";
+      window.FastApplyUtils.setValueOwner?.(b, "deterministic");
+    });
     return true;
   }
   return false;
@@ -112,17 +121,12 @@ const handleAshbyCustoms = (profile) => {
         if (textInput && window.FastApplyUtils.fillField(textInput, links.portfolio)) filledAnything = true;
     }
     else if (questionText.includes('location') || questionText.includes('city')) {
-        if (textInput && cInfo.city && textInput.dataset.fa_filled !== "true") {
-            const locString = `${cInfo.city}, ${cInfo.country || ''}`.trim();
-            if (window.FastApplyUtils.fillField(textInput, locString)) {
-                filledAnything = true;
-                setTimeout(() => {
-                    textInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown', keyCode: 40 }));
-                    textInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', keyCode: 13 }));
-                    textInput.dispatchEvent(new Event('blur', { bubbles: true }));
-                    const ashbyDropdownItem = document.querySelector('[role="listbox"] button, [role="listbox"] li, .location-dropdown-item');
-                    if (ashbyDropdownItem) ashbyDropdownItem.click();
-                }, 800);
+      if (textInput && cInfo.city && textInput.dataset.fa_filled !== "true") {
+            const locString = [cInfo.city, cInfo.state, cInfo.country]
+              .filter(Boolean)
+              .join(", ");
+            if (window.FastApplyUtils.fillAutocomplete(textInput, null, locString)) {
+              filledAnything = true;
             }
         }
     }
@@ -134,14 +138,15 @@ const handleAshbyCustoms = (profile) => {
     else if (questionText.includes('sponsorship') || questionText.includes('visa status')) {
         if (attemptFill(eeo.requireVisaFuture)) filledAnything = true;
     }
-    else if (questionText.includes('18 years of age') || questionText.includes('18+') || questionText.includes('older')) {
-        if (attemptFill('yes')) filledAnything = true;
-    }
     else if ((questionText.includes('gender') || questionText.includes('sex') || questionText.includes('identify as')) && !questionText.includes('transgender') && !questionText.includes('sexual orientation') && !questionText.includes('ethnicity') && !questionText.includes('race') && !questionText.includes('hispanic')) {
         const target = eeo.optOut ? "decline" : eeo.gender;
         if (attemptFill(target)) filledAnything = true;
     }
-    else if (questionText.includes('race') || questionText.includes('ethnic') || questionText.includes('hispanic')) {
+    else if (questionText.includes('race')) {
+        const target = eeo.optOut ? "decline" : eeo.race;
+        if (attemptFill(target)) filledAnything = true;
+    }
+    else if (questionText.includes('ethnic') || questionText.includes('hispanic')) {
         const target = eeo.optOut ? "decline" : eeo.ethnicity;
         if (attemptFill(target)) filledAnything = true;
     }
@@ -180,16 +185,11 @@ const attemptAutofill = (profile) => {
 
   const locationInput = document.querySelector('input[name="location"]') || document.querySelector('input[placeholder*="typing"]');
   if (locationInput && cInfo.city && locationInput.dataset.fa_filled !== "true") {
-    const locString = `${cInfo.city}, ${cInfo.country || ''}`.trim();
-    if (window.FastApplyUtils.fillField(locationInput, locString)) {
-        filledAnything = true;
-        setTimeout(() => {
-          locationInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown', keyCode: 40 }));
-          locationInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', keyCode: 13 }));
-          locationInput.dispatchEvent(new Event('blur', { bubbles: true }));
-          const ashbyDropdownItem = document.querySelector('[role="listbox"] button, [role="listbox"] li, .location-dropdown-item');
-          if (ashbyDropdownItem) ashbyDropdownItem.click();
-        }, 800);
+    const locString = [cInfo.city, cInfo.state, cInfo.country]
+      .filter(Boolean)
+      .join(", ");
+    if (window.FastApplyUtils.fillAutocomplete(locationInput, null, locString)) {
+      filledAnything = true;
     }
   }
 

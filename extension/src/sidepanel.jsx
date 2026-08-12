@@ -203,6 +203,22 @@ const hasValue = value => {
   );
 };
 
+const getCountMetric = (...values) => {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      return value.length;
+    }
+
+    const numericValue = Number(value);
+
+    if (Number.isFinite(numericValue) && numericValue >= 0) {
+      return numericValue;
+    }
+  }
+
+  return 0;
+};
+
 const formatValue = value => {
   if (Array.isArray(value)) {
     return value.join(', ');
@@ -572,6 +588,9 @@ function SidePanel() {
   const [error, setError] =
     useState('');
 
+  const [clockTime, setClockTime] =
+    useState(0);
+
   const answers = useMemo(() => {
     return Array.isArray(
       agentResult?.answers
@@ -601,6 +620,92 @@ function SidePanel() {
       );
     });
 
+  const scanFields = Array.isArray(agentResult?.fieldsAfterApply)
+    ? agentResult.fieldsAfterApply
+    : Array.isArray(scan?.fields)
+      ? scan.fields
+      : [];
+
+  const derivedEmptyFields = scanFields.length > 0
+    ? scanFields.filter(field => {
+        return (
+          field?.repairOnly !== true &&
+          !hasValue(field?.currentValue)
+        );
+      }).length
+    : undefined;
+
+  const derivedInvalidFields = scanFields.filter(field => {
+    return (
+      field?.invalid === true ||
+      field?.isValid === false ||
+      field?.validity?.valid === false ||
+      field?.validationState === 'invalid' ||
+      field?.status === 'invalid'
+    );
+  }).length;
+
+  const totalFieldCount = getCountMetric(
+    scan?.totalFields,
+    scan?.auditableFields,
+    scan?.auditableFieldCount,
+    scanFields
+  );
+
+  const auditableFieldCount = getCountMetric(
+    scan?.auditableFields,
+    scan?.auditableFieldCount,
+    scan?.totalFields,
+    scanFields
+  );
+
+  const emptyFieldCount = getCountMetric(
+    agentResult?.emptyAfterApply,
+    scan?.emptyFields,
+    scan?.emptyFieldCount,
+    derivedEmptyFields,
+    scan?.missingFields
+  );
+
+  const invalidFieldCount = getCountMetric(
+    agentResult?.invalidAfterApply,
+    scan?.invalidFields,
+    scan?.invalidFieldCount,
+    scan?.validationIssueCount,
+    derivedInvalidFields
+  );
+
+  const correctedFieldCount = getCountMetric(
+    agentResult?.correctedFields,
+    agentResult?.correctedFieldCount,
+    runState?.correctedFields,
+    runState?.correctedFieldCount,
+    agentResult?.appliedFields
+  );
+
+  const conflictFieldCount = getCountMetric(
+    agentResult?.conflicts,
+    agentResult?.conflictFields,
+    agentResult?.conflictCount,
+    runState?.conflicts,
+    runState?.conflictFields,
+    scan?.conflicts,
+    scan?.conflictFields
+  );
+
+  const structuralIssueCount = getCountMetric(
+    scan?.structuralIssues
+  );
+
+  const hasAuditTargets = Boolean(
+    scan &&
+    (
+      auditableFieldCount > 0 ||
+      structuralIssueCount > 0 ||
+      scanFields.length > 0
+    )
+  );
+
   const loadStorage = async () => {
     const stored =
       await readStorage(STORAGE_KEYS);
@@ -612,12 +717,19 @@ function SidePanel() {
 
     const currentPageUrl =
       activeFrame?.response?.data?.pageUrl || '';
+    const currentPageKey =
+      activeFrame?.response?.data?.pageKey || '';
 
     const scanMatchesCurrentPage =
       !stored.lastPageScan ||
       (
         Boolean(currentPageUrl) &&
-        stored.lastPageScan.pageUrl === currentPageUrl
+        stored.lastPageScan.pageUrl === currentPageUrl &&
+        (
+          !currentPageKey ||
+          !stored.lastPageScan.pageKey ||
+          stored.lastPageScan.pageKey === currentPageKey
+        )
       );
 
     setView(
@@ -638,7 +750,12 @@ function SidePanel() {
 
     setAgentResult(
       scanMatchesCurrentPage &&
-        stored.lastAgent2Result?.pageUrl === currentPageUrl
+        stored.lastAgent2Result?.pageUrl === currentPageUrl &&
+        (
+          !currentPageKey ||
+          !stored.lastAgent2Result?.pageKey ||
+          stored.lastAgent2Result.pageKey === currentPageKey
+        )
         ? stored.lastAgent2Result
         : null
     );
@@ -683,9 +800,10 @@ function SidePanel() {
     setAction('');
   };
 
-  const fillMissingFields = async () => {
-    setAction('filling');
+  const auditAndCorrectPage = async () => {
+    setAction('auditing');
     setError('');
+    setAgentResult(null);
 
     const response =
       await sendToActivePage(
@@ -703,7 +821,7 @@ function SidePanel() {
     } else {
       setError(
         response?.error ||
-        'Agent 2 could not fill the page.'
+        'Agent 2 could not audit and correct the page.'
       );
     }
 
@@ -768,9 +886,26 @@ function SidePanel() {
     };
   }, []);
 
+  useEffect(() => {
+    const updateClock = () => {
+      setClockTime(Date.now());
+    };
+    updateClock();
+    const timer = window.setInterval(updateClock, 30000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const runStateUpdatedAt = Date.parse(
+    runState?.updatedAt || runState?.startedAt || ''
+  );
+  const isRemoteAnalysisActive =
+    runState?.status === 'analysing' &&
+    Number.isFinite(runStateUpdatedAt) &&
+    clockTime > 0 &&
+    clockTime - runStateUpdatedAt < 10 * 60 * 1000;
   const isBusy =
-    action !== '' ||
-    runState?.status === 'analysing';
+    action !== '' || isRemoteAnalysisActive;
 
   return (
     <div className="min-h-screen bg-slate-950 pb-8 text-slate-100">
@@ -840,7 +975,7 @@ function SidePanel() {
               </h2>
 
               <p className="mt-1 text-xs leading-5 text-slate-500">
-                The ATS engine fills known fields automatically. Scan only after the form has loaded.
+                Inspect reads the loaded application page without changing any answers. Agent 2 can then audit both empty and completed values before correcting supported issues.
               </p>
 
               <div className="mt-4 grid grid-cols-1 gap-3">
@@ -856,20 +991,19 @@ function SidePanel() {
                     <Search className="h-5 w-5" />
                   )}
 
-                  Scan Current Page
+                  Inspect Current Page
                 </button>
 
                 <button
                   type="button"
-                  onClick={fillMissingFields}
+                  onClick={auditAndCorrectPage}
                   disabled={
                     isBusy ||
-                    !scan ||
-                    scan.missingFields === 0
+                    !hasAuditTargets
                   }
                   className="flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-fuchsia-600 px-4 py-3 font-bold text-white transition disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  {action === 'filling' ||
+                  {action === 'auditing' ||
                   runState?.status ===
                     'analysing' ? (
                     <Loader2 className="h-5 w-5 animate-spin" />
@@ -877,9 +1011,13 @@ function SidePanel() {
                     <Bot className="h-5 w-5" />
                   )}
 
-                  Fill Missing with Agent 2
+                  Audit &amp; Correct with Agent 2
                 </button>
               </div>
+
+              <p className="mt-3 text-[10px] leading-4 text-slate-600">
+                Completed fields remain part of the audit, so Agent 2 can keep correct answers and replace supported answers that are invalid or conflict with your profile.
+              </p>
             </section>
 
             {scan && (
@@ -907,34 +1045,46 @@ function SidePanel() {
                   </span>
                 </div>
 
-                <div className="mt-4 grid grid-cols-3 gap-2">
+                <div className="mt-4 grid grid-cols-2 gap-2">
                   <Metric
                     label="Total"
-                    value={scan.totalFields}
+                    value={totalFieldCount}
                     className="border-slate-700 bg-slate-950 text-slate-300"
                   />
 
                   <Metric
-                    label="Auto Filled"
-                    value={scan.scriptFilled}
-                    className="border-cyan-500/30 bg-cyan-500/10 text-cyan-400"
+                    label="Empty"
+                    value={emptyFieldCount}
+                    className="border-amber-500/30 bg-amber-500/10 text-amber-400"
                   />
 
                   <Metric
-                    label="Missing"
-                    value={scan.missingFields}
-                    className="border-amber-500/30 bg-amber-500/10 text-amber-400"
+                    label="Invalid"
+                    value={invalidFieldCount}
+                    className="border-red-500/30 bg-red-500/10 text-red-400"
+                  />
+
+                  <Metric
+                    label="Corrected"
+                    value={correctedFieldCount}
+                    className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                  />
+
+                  <Metric
+                    label="Conflicts"
+                    value={conflictFieldCount}
+                    className="border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-400"
                   />
                 </div>
 
-                {scan.fields?.length > 0 && (
+                {scanFields.length > 0 && (
                   <div className="mt-4">
                     <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-600">
-                      Missing fields
+                      Fields available for audit
                     </p>
 
                     <div className="max-h-64 space-y-2 overflow-y-auto custom-scrollbar">
-                      {scan.fields.map(field => (
+                      {scanFields.map(field => (
                         <div
                           key={field.fieldId}
                           className="rounded-xl border border-slate-800 bg-slate-950/70 p-3"
@@ -955,6 +1105,12 @@ function SidePanel() {
                             </p>
                           )}
 
+                          {hasValue(field.currentValue) && (
+                            <p className="mt-2 truncate text-[10px] text-slate-500">
+                              Current: {formatValue(field.currentValue)}
+                            </p>
+                          )}
+
                           {field.options?.length > 0 && (
                             <p className="mt-2 text-[10px] text-slate-600">
                               {field.options.length} available options
@@ -966,22 +1122,28 @@ function SidePanel() {
                   </div>
                 )}
 
-                {scan.missingFields === 0 && (
+                {emptyFieldCount === 0 && totalFieldCount > 0 && (
                   <div className="mt-4 flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300">
                     <CheckCircle2 className="h-4 w-4" />
-                    No empty supported fields were found.
+                    No empty supported fields were found. Completed values will still be audited for correctness and validity.
+                  </div>
+                )}
+
+                {totalFieldCount === 0 && structuralIssueCount === 0 && (
+                  <div className="mt-4 flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-950 p-3 text-xs text-slate-400">
+                    <CircleAlert className="h-4 w-4" />
+                    No supported fields were detected on this page.
                   </div>
                 )}
               </section>
             )}
 
-            {runState?.status ===
-              'analysing' && (
+            {isRemoteAnalysisActive && (
               <div className="flex items-center gap-3 rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-4 text-indigo-300">
                 <Loader2 className="h-5 w-5 animate-spin" />
 
                 <p className="text-xs font-semibold">
-                  Agent 2 is analysing the current page.
+                  Agent 2 is auditing completed and empty answers on the current page.
                 </p>
               </div>
             )}
@@ -989,7 +1151,7 @@ function SidePanel() {
             {agentResult && (
               <section className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
                 <h3 className="font-bold text-white">
-                  Agent 2 Result
+                  Agent 2 Audit Result
                 </h3>
 
                 {agentResult.persistenceWarning && (
@@ -1001,18 +1163,14 @@ function SidePanel() {
 
                 <div className="mt-4 grid grid-cols-3 gap-2">
                   <Metric
-                    label="Applied"
-                    value={
-                      agentResult.appliedFields
-                    }
+                    label="Corrected"
+                    value={correctedFieldCount}
                     className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
                   />
 
                   <Metric
-                    label="Review"
-                    value={
-                      agentResult.reviewRequiredFields
-                    }
+                    label="Conflicts"
+                    value={conflictFieldCount}
                     className="border-amber-500/30 bg-amber-500/10 text-amber-400"
                   />
 
@@ -1078,7 +1236,7 @@ function SidePanel() {
                   <div className="mt-5">
                     <p className="mb-2 flex items-center text-xs font-bold text-emerald-400">
                       <CheckCircle2 className="mr-2 h-4 w-4" />
-                      Applied Answers
+                      Completed or Corrected Answers
                     </p>
 
                     <div className="space-y-2">
@@ -1100,11 +1258,11 @@ function SidePanel() {
                 <Zap className="mx-auto h-8 w-8 text-cyan-500" />
 
                 <p className="mt-3 font-bold text-white">
-                  Ready to scan
+                  Ready to inspect
                 </p>
 
                 <p className="mt-2 text-xs leading-5 text-slate-500">
-                  Open a job application form, wait for deterministic autofill, then scan the current page.
+                  Open a job application form and wait for it to load. Inspection is observational; Audit &amp; Correct is the action that may update supported answers.
                 </p>
               </div>
             )}

@@ -19,8 +19,16 @@ const applicationFieldSchema = new mongoose.Schema({
   type: { type: String, default: 'text' },
   required: { type: Boolean, default: false },
   options: { type: [String], default: [] },
+  multiple: { type: Boolean, default: false },
   currentValue: { type: mongoose.Schema.Types.Mixed, default: '' },
-  maxLength: { type: Number, default: null }
+  maxLength: { type: Number, default: null },
+  pageKey: { type: String, default: '' },
+  valueOwner: { type: String, default: '' },
+  validity: {
+    valid: { type: Boolean, default: true },
+    ariaInvalid: { type: Boolean, default: false },
+    message: { type: String, default: '' }
+  }
 }, { _id: false });
 
 const applicationAnswerSchema = new mongoose.Schema({
