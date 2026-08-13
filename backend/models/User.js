@@ -31,7 +31,13 @@ const userSchema = new mongoose.Schema(
       autoSubmit: { type: Boolean, default: false },
       saveApplications: { type: Boolean, default: true },
       dailyGoal: { type: Number, default: 10 },
-    }
+    },
+    // Password reset via emailed one-time code. Only the SHA-256 hash of the
+    // code is stored; the code itself lives only in the email.
+    resetPasswordCodeHash: { type: String, default: null },
+    resetPasswordExpiresAt: { type: Date, default: null },
+    resetPasswordAttempts: { type: Number, default: 0 },
+    resetPasswordLastSentAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

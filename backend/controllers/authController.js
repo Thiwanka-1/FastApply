@@ -1,4 +1,5 @@
 //authController.js
+import crypto from 'crypto';
 import User from '../models/User.js';
 import Profile from '../models/Profile.js';
 import generateToken from '../utils/generateToken.js';
@@ -6,6 +7,7 @@ import Application from '../models/Application.js';
 import AIUsageLog from '../models/AIUsageLog.js';
 import AutofillLog from '../models/AutofillLog.js';
 import { deleteFirebaseFileByPath } from '../services/firebaseStorageService.js';
+import { sendEmail } from '../utils/sendEmail.js';
 
 const getProfileStoragePaths = profile => {
   return [
@@ -100,6 +102,119 @@ export const loginUser = async (req, res, next) => {
 export const logoutUser = (req, res) => {
   res.cookie('jwt', '', { httpOnly: true, expires: new Date(0) });
   res.status(200).json({ message: 'Logged out successfully' });
+};
+
+// --- PASSWORD RESET (email one-time code) ---
+
+const RESET_CODE_TTL_MS = 15 * 60 * 1000;
+const RESET_RESEND_COOLDOWN_MS = 60 * 1000;
+const RESET_MAX_ATTEMPTS = 5;
+
+const hashResetCode = code => {
+  return crypto.createHash('sha256').update(String(code)).digest('hex');
+};
+
+export const forgotPassword = async (req, res, next) => {
+  try {
+    const email = String(req.body.email || '').toLowerCase().trim();
+
+    // The response is identical whether or not the account exists, so the
+    // endpoint cannot be used to probe which emails are registered.
+    const respondGenerically = () => {
+      res.status(200).json({
+        message:
+          'If an account exists for that email, a 6-digit reset code has been sent. It expires in 15 minutes.'
+      });
+    };
+
+    if (!email) return respondGenerically();
+
+    const user = await User.findOne({ email });
+    if (!user) return respondGenerically();
+
+    // One code per minute per account.
+    if (
+      user.resetPasswordLastSentAt &&
+      Date.now() - user.resetPasswordLastSentAt.getTime() < RESET_RESEND_COOLDOWN_MS
+    ) {
+      return respondGenerically();
+    }
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    user.resetPasswordCodeHash = hashResetCode(code);
+    user.resetPasswordExpiresAt = new Date(Date.now() + RESET_CODE_TTL_MS);
+    user.resetPasswordAttempts = 0;
+    user.resetPasswordLastSentAt = new Date();
+    await user.save();
+
+    await sendEmail({
+      to: user.email,
+      subject: `${code} is your FastApply password reset code`,
+      text:
+        `Hi ${user.name},\n\n` +
+        `Your FastApply password reset code is: ${code}\n\n` +
+        `Enter this code in the reset form. It expires in 15 minutes.\n` +
+        `If you did not request a password reset, you can safely ignore this email — ` +
+        `your password will not change.`,
+      html:
+        `<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto">` +
+        `<h2 style="color:#0891b2">FastApply password reset</h2>` +
+        `<p>Hi ${user.name},</p>` +
+        `<p>Your password reset code is:</p>` +
+        `<p style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#0f172a">${code}</p>` +
+        `<p>Enter this code in the reset form. It expires in <strong>15 minutes</strong>.</p>` +
+        `<p style="color:#64748b;font-size:13px">If you did not request a password reset, you can ` +
+        `safely ignore this email — your password will not change.</p>` +
+        `</div>`
+    });
+
+    return respondGenerically();
+  } catch (error) { next(error); }
+};
+
+export const resetPassword = async (req, res, next) => {
+  try {
+    const email = String(req.body.email || '').toLowerCase().trim();
+    const code = String(req.body.code || '').trim();
+    const newPassword = String(req.body.newPassword || '');
+
+    if (!email || !code || !newPassword) {
+      res.status(400);
+      throw new Error('Email, reset code and new password are required');
+    }
+
+    if (newPassword.length < 6) {
+      res.status(400);
+      throw new Error('Password must be at least 6 characters');
+    }
+
+    const rejectCode = () => {
+      res.status(400);
+      throw new Error('The reset code is invalid or has expired. Request a new one.');
+    };
+
+    const user = await User.findOne({ email });
+    if (!user || !user.resetPasswordCodeHash || !user.resetPasswordExpiresAt) rejectCode();
+    if (user.resetPasswordExpiresAt.getTime() < Date.now()) rejectCode();
+    if (user.resetPasswordAttempts >= RESET_MAX_ATTEMPTS) rejectCode();
+
+    if (hashResetCode(code) !== user.resetPasswordCodeHash) {
+      user.resetPasswordAttempts += 1;
+      await user.save();
+      rejectCode();
+    }
+
+    user.password = newPassword; // the pre-save hook hashes it
+    user.resetPasswordCodeHash = null;
+    user.resetPasswordExpiresAt = null;
+    user.resetPasswordAttempts = 0;
+    user.resetPasswordLastSentAt = null;
+    await user.save();
+
+    res.status(200).json({
+      message: 'Password reset successfully. You can now log in with your new password.'
+    });
+  } catch (error) { next(error); }
 };
 
 // --- PROTECTED USER ROUTES (Requires login) ---

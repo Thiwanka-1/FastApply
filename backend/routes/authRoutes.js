@@ -1,9 +1,11 @@
 //authRoutes.js
 import express from 'express';
-import { 
-  registerUser, 
-  loginUser, 
+import {
+  registerUser,
+  loginUser,
   logoutUser,
+  forgotPassword,
+  resetPassword,
   getUserProfile,
   updateUserProfile,
   deleteUserProfile,
@@ -19,6 +21,8 @@ const router = express.Router();
 router.post('/register', registerUser);
 router.post('/login', loginUser);
 router.post('/logout', logoutUser);
+router.post('/forgot-password', forgotPassword);
+router.post('/reset-password', resetPassword);
 
 // Personal profile routes (Requires login)
 // By using router.route, we can chain GET, PUT, and DELETE to the same URL
