@@ -2,7 +2,7 @@
 // Bump this stamp on every build: it prints in the console banner so a stale
 // extension load (Chrome runs the old copy until "Reload" is clicked in
 // chrome://extensions) is immediately visible.
-const FASTAPPLY_BUILD = "2026-08-13.3";
+const FASTAPPLY_BUILD = "2026-08-13.4";
 console.log(`[FastApply] Utils Loaded. (build ${FASTAPPLY_BUILD})`);
 
 const normalizeValue = (value) => String(value ?? "").trim();
@@ -768,6 +768,23 @@ const fillField = (element, value, options = {}) => {
     setNativeValue(element, normalizedValue);
     triggerEvents(element, { withFocus: false, withInput: true, withChange: true, withBlur: false, withKeyboard: true });
 
+    // Some React-controlled form libraries (Ashby's current application form
+    // among them) revert programmatic value writes because their state never
+    // saw the change. When the value did not stick, push the text through
+    // the browser's native editing pipeline — indistinguishable from real
+    // typing, which controlled inputs always accept.
+    if (
+      getElementCurrentValue(element) !== normalizeValue(normalizedValue) &&
+      (element.tagName === "INPUT" || element.tagName === "TEXTAREA")
+    ) {
+      try {
+        element.focus();
+        element.select?.();
+        document.execCommand("insertText", false, normalizedValue);
+        triggerEvents(element, { withFocus: false, withInput: false, withChange: true, withBlur: false });
+      } catch (_) {}
+    }
+
     const elementName = normalizeText(element.name || element.id || getLabelText(element));
     const shouldBlurImmediately =
       !elementName.includes("location") &&
@@ -855,6 +872,16 @@ const fillAutocomplete = (visibleInput, hiddenInput, value, options = {}) => {
     triggerEvents(visibleInput, { withFocus: true, withInput: false, withChange: false, withBlur: false });
     setNativeValue(visibleInput, normalizedValue);
     triggerEvents(visibleInput, { withFocus: false, withInput: true, withChange: true, withBlur: false, withKeyboard: true });
+
+    // Same native-typing fallback as fillField: React-controlled inputs can
+    // revert programmatic writes, leaving the suggestion list never opening.
+    if (getElementCurrentValue(visibleInput) !== normalizeValue(normalizedValue)) {
+      try {
+        visibleInput.focus();
+        visibleInput.select?.();
+        document.execCommand("insertText", false, normalizedValue);
+      } catch (_) {}
+    }
 
     setTimeout(() => {
       const candidates = [

@@ -167,27 +167,38 @@ const handleAshbyCustoms = (profile) => {
   return filledAnything;
 };
 
+let ashbyLoggedFirstPass = false;
+
 const attemptAutofill = (profile) => {
   const pInfo = profile.personalInfo || {};
   const cInfo = profile.contactInfo || {};
   let filledAnything = false;
 
-  const fullNameInput = document.querySelector('input[name="name"]') || document.querySelector('input[name="fullName"]');
+  // Ashby's current application form identifies its standard fields with
+  // _systemfield_* ids (name/email/phone/location); the old name-attribute
+  // selectors stopped matching anything after their form update.
+  const byId = id => document.getElementById(id);
+
+  const fullNameInput = byId('_systemfield_name') ||
+    document.querySelector('input[name="name"], input[name="fullName"], input[autocomplete="name"]');
   if (fullNameInput && pInfo.firstName) {
     if (window.FastApplyUtils.fillField(fullNameInput, `${pInfo.firstName} ${pInfo.lastName || ''}`.trim())) filledAnything = true;
   }
 
-  const fNameInput = document.querySelector('input[name*="first"]');
-  const lNameInput = document.querySelector('input[name*="last"]');
+  const fNameInput = document.querySelector('input[name*="first"], input[autocomplete="given-name"]');
+  const lNameInput = document.querySelector('input[name*="last"], input[autocomplete="family-name"]');
   if (fNameInput && pInfo.firstName) if (window.FastApplyUtils.fillField(fNameInput, pInfo.firstName)) filledAnything = true;
   if (lNameInput && pInfo.lastName) if (window.FastApplyUtils.fillField(lNameInput, pInfo.lastName)) filledAnything = true;
 
-  const emailInput = document.querySelector('input[type="email"]') || document.querySelector('input[name="email"]');
-  const phoneInput = document.querySelector('input[type="tel"]') || document.querySelector('input[name*="phone"]');
+  const emailInput = byId('_systemfield_email') ||
+    document.querySelector('input[type="email"], input[name="email"], input[autocomplete="email"]');
+  const phoneInput = byId('_systemfield_phone') ||
+    document.querySelector('input[type="tel"], input[name*="phone"], input[autocomplete="tel"]');
   if (emailInput && cInfo.email) if (window.FastApplyUtils.fillField(emailInput, cInfo.email)) filledAnything = true;
   if (phoneInput && cInfo.phone) if (window.FastApplyUtils.fillField(phoneInput, cInfo.phone)) filledAnything = true;
 
-  const locationInput = document.querySelector('input[name="location"]') || document.querySelector('input[placeholder*="typing"]');
+  const locationInput = byId('_systemfield_location') ||
+    document.querySelector('input[name="location"], input[placeholder*="typing" i], input[placeholder*="location" i]');
   if (locationInput && cInfo.city && locationInput.dataset.fa_filled !== "true") {
     const locString = [cInfo.city, cInfo.state, cInfo.country]
       .filter(Boolean)
@@ -198,6 +209,19 @@ const attemptAutofill = (profile) => {
   }
 
   if (handleAshbyCustoms(profile)) filledAnything = true;
+
+  if (!ashbyLoggedFirstPass) {
+    ashbyLoggedFirstPass = true;
+    console.debug(
+      "[FastApply:ashby] first pass:",
+      "name:", Boolean(fullNameInput),
+      "email:", Boolean(emailInput),
+      "phone:", Boolean(phoneInput),
+      "location:", Boolean(locationInput),
+      "labels:", document.querySelectorAll("label").length,
+      "filledAnything:", filledAnything
+    );
+  }
 
   return filledAnything;
 };
