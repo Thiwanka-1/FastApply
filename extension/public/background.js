@@ -76,13 +76,22 @@ const fetchProfileData = async () => {
   if (result.success) {
     chrome.storage.local.set({
       profileData: result.data,
-      profileFetchedAt: new Date().toISOString()
+      profileFetchedAt: new Date().toISOString(),
+      profileAuthFailures: 0
     });
   } else if (result.status === 401) {
-    chrome.storage.local.remove([
-      "profileData",
-      "profileFetchedAt"
-    ]);
+    // A single 401 can be transient (server restart, cookie race). Wiping the
+    // cache immediately silently disabled every engine on every page; only
+    // clear it after repeated consecutive auth failures.
+    chrome.storage.local.get(["profileAuthFailures"], values => {
+      const failures = (Number(values.profileAuthFailures) || 0) + 1;
+      if (failures >= 3) {
+        chrome.storage.local.remove(["profileData", "profileFetchedAt"]);
+        chrome.storage.local.set({ profileAuthFailures: 0 });
+      } else {
+        chrome.storage.local.set({ profileAuthFailures: failures });
+      }
+    });
   }
 
   return result;

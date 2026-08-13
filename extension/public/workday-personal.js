@@ -55,7 +55,8 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
   W.fillDeterministicDropdown = W.fillDeterministicDropdown || (async (
     container,
-    value
+    value,
+    settings = {}
   ) => {
     const target = String(value ?? "").trim();
     if (!container || !target || hasProtectedOwner(container)) return false;
@@ -70,7 +71,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     if (!trigger || hasProtectedOwner(trigger)) return false;
     const current = W.readDropdownValue?.(container, trigger) || "";
     if (!W.isWorkdayPlaceholder(current)) return false;
-    return await W.fillWorkdayDropdown?.(container, target) === true;
+    return await W.fillWorkdayDropdown?.(container, target, settings) === true;
   });
 
   const COUNTRY_ALIASES = new Map([
@@ -259,9 +260,13 @@ window.WorkdayEngine = window.WorkdayEngine || {};
           filledAnything = W.fillDeterministicText(input, contact.addressLine1) || filledAnything;
         } else if (question.includes("address line 2")) {
           filledAnything = W.fillDeterministicText(input, contact.addressLine2) || filledAnything;
-        } else if (question === "city") {
+        } else if (question === "city" || question === "city town" || question === "town city") {
           filledAnything = W.fillDeterministicText(input, contact.city) || filledAnything;
-        } else if (question.includes("postal code") || question === "zip") {
+        } else if (
+          question.includes("postal code") ||
+          question === "zip" ||
+          question.includes("zip code")
+        ) {
           filledAnything = W.fillDeterministicText(input, contact.postalCode) || filledAnything;
         } else if (
           question.includes("phone number") &&
@@ -297,7 +302,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
           !question.includes("phone code")
         ) {
           filledAnything = await W.fillDeterministicDropdown(container, country) || filledAnything;
-        } else if (question.includes("email address")) {
+        } else if (question.includes("email address") || question === "email") {
           filledAnything = W.fillDeterministicText(input, contact.email) || filledAnything;
         }
       }

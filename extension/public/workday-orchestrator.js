@@ -7,6 +7,12 @@ window.WorkdayEngine = window.WorkdayEngine || {};
   const W = window.WorkdayEngine;
   const U = window.FastApplyUtils;
 
+  W.debug = (...details) => {
+    try {
+      console.debug("[FastApply:workday]", ...details);
+    } catch (_) {}
+  };
+
   W.wait = milliseconds => new Promise(resolve => {
     window.setTimeout(resolve, milliseconds);
   });
@@ -43,6 +49,36 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     element?.getAttribute?.("title") ||
     ""
   ).replace(/\s+/g, " ").trim();
+
+  // Workday prompt rows often render their label twice (icon + text node).
+  // Collapse an exactly doubled string back to the single option label.
+  W.getOptionText = element => {
+    const text = W.getElementText(element);
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length > 1 && words.length % 2 === 0) {
+      const midpoint = words.length / 2;
+      const first = words.slice(0, midpoint).join(" ");
+      const second = words.slice(midpoint).join(" ");
+      if (W.normalizeText(first) === W.normalizeText(second)) return first;
+    }
+    return text;
+  };
+
+  const WORKDAY_PLACEHOLDER_PATTERN = /^(select|select one|select a value|select all that apply|choose|choose one|please select|search|type to search|one|none selected)$/;
+
+  // Single source of truth for "this dropdown is still empty". Tenants render
+  // "Select One", "Select...", "Search", localized variants with trailing dots.
+  W.isWorkdayPlaceholder = value => {
+    const normalized = W.normalizeText(String(value ?? "").replace(/[.…]+\s*$/, ""));
+    return !normalized || WORKDAY_PLACEHOLDER_PATTERN.test(normalized);
+  };
+
+  // Label text with decorations ("(Required)", trailing asterisks) removed so
+  // anchored question patterns still match.
+  W.normalizeQuestion = value => W.normalizeText(value)
+    .replace(/\b(required|optional)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 
   W.getTodayDate = () => {
     const today = new Date();
@@ -131,8 +167,24 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     const characters = usesPageMask ? target.replace(/\D/g, "") : target;
 
     try {
+      const prototype = element.tagName === "TEXTAREA"
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+      const writeValue = nextValue => {
+        if (setter) setter.call(element, nextValue);
+        else element.value = nextValue;
+      };
+
+      // Focus once and defer the change event until the full value has been
+      // typed; per-character focus/change churn triggers Workday's masked
+      // input validation mid-value and marks the field aria-invalid.
       element.focus();
-      W.setInputValue(element, "");
+      writeValue("");
+      element.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "deleteContentBackward"
+      }));
 
       for (const character of characters) {
         element.dispatchEvent(new KeyboardEvent("keydown", {
@@ -140,7 +192,12 @@ window.WorkdayEngine = window.WorkdayEngine || {};
           bubbles: true,
           cancelable: true
         }));
-        W.setInputValue(element, `${element.value || ""}${character}`);
+        writeValue(`${element.value || ""}${character}`);
+        element.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          data: character,
+          inputType: "insertText"
+        }));
         element.dispatchEvent(new KeyboardEvent("keyup", {
           key: character,
           bubbles: true,
@@ -267,10 +324,14 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
   W.isWorkdayOptionSelected = option => {
     if (!option) return false;
+    // aria-selected and data-state "selected"/"active" mark the HIGHLIGHTED
+    // (keyboard-focused) row in Workday listboxes — usually the first search
+    // result — not a committed choice. Treating them as "already selected"
+    // made the engine skip the click on the top result, so nothing was ever
+    // actually selected. Only trust real checked state.
     if (
-      option.getAttribute?.("aria-selected") === "true" ||
       option.getAttribute?.("aria-checked") === "true" ||
-      /^(checked|selected|active)$/i.test(option.getAttribute?.("data-state") || "")
+      /^checked$/i.test(option.getAttribute?.("data-state") || "")
     ) return true;
 
     const choice = option.matches?.(
@@ -398,6 +459,14 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       ? (label.getRootNode()?.getElementById?.(labelFor) || document.getElementById(labelFor))
       : null;
 
+    // Workday wraps each field in a dedicated formField container. Prefer it:
+    // the ancestor walks below can land on a row wrapper that spans the
+    // neighbouring field (writing values into the wrong control).
+    const formField = label.closest?.('[data-automation-id*="formField" i]');
+    if (formField && (!linkedControl || formField.contains(linkedControl))) {
+      return formField;
+    }
+
     const selector = [
       "input:not([type='hidden'])",
       "select",
@@ -409,7 +478,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     if (linkedControl) {
       let current = linkedControl.parentElement;
       for (let depth = 0; current && depth < 5; depth += 1) {
-        if (current.contains(label) || current.querySelector("label")) return current;
+        if (current.contains(label)) return current;
         current = current.parentElement;
       }
       return linkedControl.parentElement;
@@ -564,22 +633,40 @@ window.WorkdayEngine = window.WorkdayEngine || {};
   W.findBestOption = (options, targetValue, settings = {}) => {
     const target = W.normalizeText(targetValue);
     if (!target) return null;
-    const usable = options.filter(option => W.normalizeText(W.getElementText(option)));
-    const exact = usable.find(option => W.normalizeText(W.getElementText(option)) === target);
+    const optionKey = option => W.normalizeText(W.getOptionText(option));
+    const usable = options.filter(option => optionKey(option));
+    const exact = usable.find(option => optionKey(option) === target);
     if (exact) return exact;
 
+    // A parenthetical qualifier does not change an option's identity:
+    // "GraphQL (Query Language)" is the option for "GraphQL", "Java
+    // (Programming Language)" for "Java".
+    const strippedKey = option => W.normalizeText(
+      W.getOptionText(option).replace(/\s*\([^)]*\)/g, " ")
+    );
+    const strippedMatches = usable.filter(option => strippedKey(option) === target);
+    if (strippedMatches.length) return strippedMatches[0];
+
     const wholeValueMatches = usable.filter(option => {
-      const optionText = W.normalizeText(W.getElementText(option));
+      const optionText = optionKey(option);
       return optionText.startsWith(`${target} `) || optionText.endsWith(` ${target}`);
     });
     if (
       settings.allowAlias === true &&
       wholeValueMatches.length === 1 &&
       (U?.getSemanticMatchScore?.(
-        W.getElementText(wholeValueMatches[0]),
+        W.getOptionText(wholeValueMatches[0]),
         targetValue
       ) || 0) >= 0.74
     ) {
+      return wholeValueMatches[0];
+    }
+    // Skills-style prompts (allowAlias) return results in Workday relevance
+    // order. When the skill name is a whole-word prefix of several options
+    // ("Serverless" → "Serverless Computing", "Serverless Security"), the
+    // top-ranked one is the intended pick; rejecting all of them left the
+    // skill unselectable and burned every retry.
+    if (settings.allowAlias === true && wholeValueMatches.length > 1) {
       return wholeValueMatches[0];
     }
 
@@ -587,7 +674,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     return U?.findBestSemanticMatch?.(
       usable,
       targetValue,
-      W.getElementText,
+      W.getOptionText,
       {
         minimumScore: settings.minimumScore,
         minimumGap: settings.minimumGap
@@ -599,20 +686,24 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     const selected = Array.from(container?.querySelectorAll?.(
       '[data-automation-id^="selectedItem"], [aria-selected="true"], [data-testid*="selected"]'
     ) || [])
-      .map(W.getElementText)
+      .map(W.getOptionText)
       .filter(Boolean)
       .join(", ");
     if (selected) return selected;
     if (trigger?.tagName === "INPUT") {
       const value = String(trigger.value || "").trim();
-      return /^(select|select one|choose|choose one|please select)$/i.test(value)
-        ? ""
-        : value;
+      return W.isWorkdayPlaceholder(value) ? "" : value;
     }
-    const value = W.getElementText(trigger)
-      .replace(/^(select|choose)\s*/i, "")
+    // Only trust text actually rendered inside the trigger. The aria-label /
+    // title fallbacks repeat the field label ("Country"), not the chosen
+    // value, and previously made empty dropdowns look filled.
+    const rendered = String(trigger?.innerText || trigger?.textContent || "")
+      .replace(/\s+/g, " ")
       .trim();
-    return /^(one|please select)$/i.test(value) ? "" : value;
+    if (!rendered || W.isWorkdayPlaceholder(rendered)) return "";
+    const labelText = W.normalizeText(U?.getLabelText?.(trigger) || "");
+    if (labelText && W.normalizeText(rendered) === labelText) return "";
+    return rendered;
   };
 
   W.closeDropdown = control => {
@@ -626,6 +717,80 @@ window.WorkdayEngine = window.WorkdayEngine || {};
         cancelable: true
       }));
     }
+  };
+
+  // Tenants open their prompt widgets from different events (plain click,
+  // pointer sequence, keyboard). Try each strategy and verify the popup
+  // actually rendered options before giving up — a blind synthetic click can
+  // toggle the popup open and instantly closed again.
+  W.openDropdown = async (trigger, options = {}) => {
+    const timeout = Number(options.timeout) || 4500;
+    const readOptions = () => {
+      const found = W.getWorkdayOptions(trigger);
+      return found.length ? found : null;
+    };
+
+    const alreadyOpen = readOptions();
+    if (alreadyOpen) return alreadyOpen;
+
+    const strategies = [
+      // The pointer-sequence click is the opener proven against live
+      // tenants; keep it first so alternate strategies never toggle an
+      // already-opening popup shut.
+      () => W.clickElement(trigger),
+      () => {
+        try {
+          trigger.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+          trigger.focus?.();
+          trigger.click?.();
+          return true;
+        } catch (_) {
+          return false;
+        }
+      },
+      () => {
+        try {
+          trigger.focus?.();
+          for (const type of ["keydown", "keyup"]) {
+            trigger.dispatchEvent(new KeyboardEvent(type, {
+              key: "Enter",
+              code: "Enter",
+              keyCode: 13,
+              which: 13,
+              bubbles: true,
+              cancelable: true
+            }));
+          }
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+    ];
+
+    const perStrategyTimeout = Math.max(
+      1200,
+      Math.floor(timeout / strategies.length)
+    );
+    for (const strategy of strategies) {
+      if (!strategy()) continue;
+      const opened = await W.waitFor(readOptions, {
+        timeout: perStrategyTimeout,
+        interval: 120
+      });
+      if (opened) return opened;
+      // If the popup is open but its options are still streaming in, keep
+      // waiting instead of moving on — the next strategy's click would
+      // toggle the popup closed again.
+      if (getControlledPopup(trigger)) {
+        const lateOptions = await W.waitFor(readOptions, {
+          timeout,
+          interval: 150
+        });
+        if (lateOptions) return lateOptions;
+      }
+    }
+    return null;
   };
 
   W.fillWorkdayDropdown = async (container, targetValue, settings = {}) => {
@@ -655,12 +820,12 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     container.dataset.fa_dropdown_processing = "true";
 
     try {
-      if (!W.clickElement(trigger)) return false;
-
-      let options = await W.waitFor(() => {
-        const found = W.getWorkdayOptions(trigger);
-        return found.length ? found : null;
-      }, { timeout: 4500 });
+      let options = await W.openDropdown(trigger, {
+        timeout: Number(settings.openTimeout) || 4500
+      });
+      if (!options) {
+        W.debug("dropdown never rendered options for:", target);
+      }
 
       let match = W.findBestOption(options || [], target, settings);
 
@@ -673,26 +838,36 @@ window.WorkdayEngine = window.WorkdayEngine || {};
             input !== trigger &&
             !input.closest('[data-automation-id="formField-skills"]');
         });
-        const searchInput = searchInputs[searchInputs.length - 1];
+        // Prompt fields where the trigger itself is the search input have no
+        // separate popup search box — type the query into the trigger.
+        const searchInput = searchInputs[searchInputs.length - 1] ||
+          (trigger.tagName === "INPUT" && !trigger.readOnly ? trigger : null);
 
         if (searchInput) {
           W.typeInputValue(searchInput, target);
           match = await W.waitFor(() => {
             options = W.getWorkdayOptions(trigger);
             return W.findBestOption(options, target, settings);
-          }, { timeout: 6000, interval: 180 });
+          }, { timeout: Number(settings.searchTimeout) || 6000, interval: 180 });
         }
       }
 
       if (!match) {
+        W.debug("no dropdown option matched:", target);
         W.closeDropdown(trigger);
         return false;
       }
 
-      const matchedLabel = W.getElementText(match) || target;
+      const matchedLabel = W.getOptionText(match) || target;
       const confirmed = await W.selectWorkdayOption(match, () => {
         const selectedValue = W.readDropdownValue(container, trigger);
-        return W.normalizeText(selectedValue) === W.normalizeText(matchedLabel)
+        if (!selectedValue) return null;
+        const normalizedSelected = W.normalizeText(selectedValue);
+        return (
+          normalizedSelected === W.normalizeText(matchedLabel) ||
+          normalizedSelected === W.normalizeText(target) ||
+          U?.smartMatch?.(selectedValue, matchedLabel) === true
+        )
           ? selectedValue
           : null;
       }, {
@@ -733,6 +908,10 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     ).filter(W.isVisible).some(element => {
       return /^(review|review your application)$/i.test(W.getElementText(element).trim());
     });
+
+    // The Review page re-renders every prior section's headings, so this must
+    // win before the section-specific checks classify it as something else.
+    if (hasReviewHeading) return "REVIEW";
 
     if (/voluntary disclosures?|self identification/.test(normalizedHeadings)) {
       return "VOLUNTARY_DISCLOSURES";
@@ -775,8 +954,6 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       return "APPLICATION_QUESTIONS";
     }
 
-    if (hasReviewHeading) return "REVIEW";
-
     return "UNKNOWN";
   };
 
@@ -801,7 +978,8 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     W.lastProfile = profile;
 
     const execute = async () => {
-      switch (getCurrentPage()) {
+      const page = getCurrentPage();
+      switch (page) {
         case "PERSONAL_INFO":
           return W.handlePersonalInfo?.(profile);
         case "EXPERIENCE_EDUCATION":
@@ -809,14 +987,27 @@ window.WorkdayEngine = window.WorkdayEngine || {};
         case "APPLICATION_QUESTIONS":
         case "VOLUNTARY_DISCLOSURES":
           return W.handleEEO?.(profile);
+        case "REVIEW":
+          return false;
         default:
+          // Steps with tenant-specific titles ("Additional Information",
+          // "Disclosures", …) still carry Workday form fields; run the
+          // generic question handler instead of skipping them silently.
+          if (document.querySelector('[data-automation-id*="formField" i]')) {
+            W.debug("unrecognized step, running question handler:", W.getPageKey());
+            return W.handleEEO?.(profile);
+          }
+          W.debug("no fillable step detected:", W.getPageKey());
           return false;
       }
     };
 
     const previousRun = W.deterministicQueue || Promise.resolve();
     const currentRun = previousRun
-      .catch(() => false)
+      .catch(error => {
+        W.debug("previous deterministic run failed:", error);
+        return false;
+      })
       .then(execute);
     W.deterministicQueue = currentRun;
 
@@ -924,7 +1115,9 @@ window.WorkdayEngine = window.WorkdayEngine || {};
           if (response?.success && response.data) {
             currentProfile = response.data;
           }
-        } catch (_) {}
+        } catch (error) {
+          W.debug("profile fetch via background failed:", error);
+        }
       }
 
       if (!currentProfile) {
@@ -936,6 +1129,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       let activeControlSignature = "";
       let queuedPageKey = "";
       let pendingRun = 0;
+      let lastSeenPageKey = "";
       const pagePassCounts = new Map();
       const processedSignatures = new Set();
 
@@ -962,15 +1156,29 @@ window.WorkdayEngine = window.WorkdayEngine || {};
           .join("|");
       };
 
-      const run = async expectedPageKey => {
+      const run = async (expectedPageKey, signatureKey) => {
         if (automaticRunInFlight) {
           queuedPageKey = expectedPageKey;
           return;
         }
-        if (expectedPageKey !== W.getPageKey()) return;
+        if (expectedPageKey !== W.getPageKey()) {
+          // Workday briefly hides/re-renders the wizard heading during step
+          // transitions; reschedule instead of dropping this page state
+          // (recording it as processed here would block it permanently).
+          W.debug("page key changed before run; rescheduling:", expectedPageKey);
+          activePageKey = "";
+          activeControlSignature = "";
+          window.clearTimeout(pendingRun);
+          pendingRun = window.setTimeout(scheduleForActivePage, 600);
+          return;
+        }
         automaticRunInFlight = true;
         try {
           await runWorkdayDeterministic(currentProfile);
+          if (signatureKey) processedSignatures.add(signatureKey);
+        } catch (error) {
+          W.debug("deterministic run failed:", error);
+          if (signatureKey) processedSignatures.add(signatureKey);
         } finally {
           automaticRunInFlight = false;
           const completedPasses = (pagePassCounts.get(expectedPageKey) || 0) + 1;
@@ -996,7 +1204,25 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       const scheduleForActivePage = () => {
         if (!currentProfile) return;
         const pageKey = W.getPageKey();
-        if (pageKey.startsWith("UNKNOWN:")) return;
+
+        if (pageKey !== lastSeenPageKey) {
+          // A new wizard step — or a return to a previous one via Back /
+          // validation re-render — starts fresh. Old signatures must never
+          // block re-filling a step the user navigated back to.
+          lastSeenPageKey = pageKey;
+          processedSignatures.clear();
+          pagePassCounts.delete(pageKey);
+          activePageKey = "";
+          activeControlSignature = "";
+        }
+
+        // Unrecognized steps still get a pass when they carry Workday form
+        // fields (tenant-titled question pages); pure browse/search pages are
+        // skipped.
+        if (
+          pageKey.startsWith("UNKNOWN:") &&
+          !document.querySelector('[data-automation-id*="formField" i]')
+        ) return;
 
         const controlSignature = getControlSignature();
         if (!controlSignature) return;
@@ -1007,17 +1233,23 @@ window.WorkdayEngine = window.WorkdayEngine || {};
         ) return;
         if (processedSignatures.has(signatureKey)) return;
 
-        processedSignatures.add(signatureKey);
         activePageKey = pageKey;
         activeControlSignature = controlSignature;
         if (!pagePassCounts.has(pageKey)) pagePassCounts.set(pageKey, 0);
         window.clearTimeout(pendingRun);
         pendingRun = window.setTimeout(() => {
-          run(pageKey);
+          run(pageKey, signatureKey);
         }, 450);
       };
 
-      const observer = new MutationObserver(scheduleForActivePage);
+      // Workday's React tree mutates continuously; computing the control
+      // signature per mutation batch forces synchronous layout. Debounce so
+      // the (expensive) scheduling pass runs once the DOM settles.
+      let observerDebounce = 0;
+      const observer = new MutationObserver(() => {
+        window.clearTimeout(observerDebounce);
+        observerDebounce = window.setTimeout(scheduleForActivePage, 250);
+      });
       observer.observe(document.documentElement, {
         childList: true,
         subtree: true

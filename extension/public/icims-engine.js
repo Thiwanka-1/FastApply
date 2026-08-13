@@ -1,92 +1,24 @@
 // public/icims-engine.js
 console.log("[FastApply] iCIMS Engine Active.");
 
+// Engine scripts share one isolated world; an IIFE keeps top-level
+// declarations from colliding with utils.js or other scripts.
+(() => {
+
 window.ICIMSEngine = window.ICIMSEngine || {};
 window.ICIMSEngine.wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // --- 1. CORE INJECTOR ---
-window.ICIMSEngine.setNativeValue = (element, value) => {
-    const utils = window.FastApplyUtils;
-    if (
-        !element ||
-        !value ||
-        element.dataset.fa_filled === "true" ||
-        utils?.isProtectedFromDeterministicFill?.(element)
-    ) return false;
-
-    const selected = element.tagName === "SELECT"
-        ? element.options?.[element.selectedIndex]
-        : null;
-    const selectedIsPlaceholder = selected && /^(select|select one|choose|choose one|please select|none)$/i.test(
-        String(selected.text || selected.label || selected.value || "").trim()
-    );
-    if (
-        (element.tagName === "SELECT" && selected && !selected.disabled && !selectedIsPlaceholder && String(selected.value || "").trim()) ||
-        (element.tagName !== "SELECT" && String(element.value || "").trim())
-    ) return false;
-
-    const label = String(utils?.getLabelText?.(element) || "").toLowerCase();
-    const target = element.type === "url" || /url|website|linkedin|github|portfolio/.test(label)
-        ? utils?.ensureHttpUrl?.(value)
-        : element.type === "tel" || /phone|telephone|mobile/.test(label)
-            ? utils?.formatPhoneNumber?.(value)
-            : String(value);
-    if (!target) return false;
-    element.focus();
-    
-    let proto = window.HTMLInputElement.prototype;
-    if (element.tagName === "TEXTAREA") {
-        proto = window.HTMLTextAreaElement.prototype;
-    } else if (element.tagName === "SELECT") {
-        proto = window.HTMLSelectElement.prototype;
-    }
-
-    const nativeSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-    
-    if (nativeSetter) {
-        nativeSetter.call(element, target);
-    } else {
-        element.value = target;
-    }
-    
-    element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-    element.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
-    if (!String(element.value || "").trim()) return false;
-    element.dataset.fa_filled = "true";
-    utils?.setValueOwner?.(element, "deterministic");
-    return true;
-};
+// Delegates to the shared implementation in utils.js (identical logic
+// previously copy-pasted into each engine).
+window.ICIMSEngine.setNativeValue = (element, value) =>
+    window.FastApplyUtils.setEngineFieldValue(element, value);
 
 // --- 2. FUZZY MATCHER (Upgraded for Degrees & Countries) ---
-window.ICIMSEngine.smartMatch = (optText, targetValue) => {
-    if (typeof window.FastApplyUtils?.smartMatch === "function") {
-        return window.FastApplyUtils.smartMatch(optText, targetValue);
-    }
-    const o = String(optText || "").toLowerCase().trim();
-    const t = String(targetValue || "").toLowerCase().trim();
-    if (!o || !t) return false;
-
-    // Standard yes/no/EEO matching
-    if ((t.includes("decline") || t.includes("prefer not")) && (o.includes("decline") || o.includes("prefer not") || o.includes("choose not"))) return true;
-    if ((t === "male" || t === "man") && /\b(male|man)\b/i.test(o) && !/\b(female|woman)\b/i.test(o)) return true;
-    if ((t === "female" || t === "woman") && /\b(female|woman)\b/i.test(o)) return true;
-    if (t.startsWith("yes") && o.startsWith("yes")) return true;
-    if (t.startsWith("no") && o.startsWith("no")) return true;
-    
-    // Country Fallbacks
-    if ((t === "us" || t === "usa" || t === "united states") && (o === "united states" || o === "united states of america")) return true;
-    if ((t === "uk" || t === "united kingdom") && o === "united kingdom") return true;
-
-    // Degree matching
-    if (t.includes("bachelor") && o.includes("bachelor")) return true;
-    if (t.includes("master") && o.includes("master")) return true;
-    if ((t.includes("phd") || t.includes("doctorate")) && (o.includes("doctorate") || o.includes("phd"))) return true;
-    if ((t.includes("associate") || t.includes("aa") || t.includes("as")) && o.includes("associate")) return true;
-    if (t.includes("high school") && o.includes("high school")) return true;
-
-    return o === t || o.includes(t) || t.includes(o);
-};
+// utils.js always loads first, so the old inline fallback (a loose
+// substring matcher) was dead code with dangerous semantics if ever hit.
+window.ICIMSEngine.smartMatch = (optText, targetValue) =>
+    window.FastApplyUtils.smartMatch(optText, targetValue) === true;
 
 // --- 3. TARGET LOCATORS (Upgraded for Custom UI & Partial Matches) ---
 window.ICIMSEngine.findInputByLabelText = (text, contextKeyword = "", expectedTag = "") => {
@@ -267,8 +199,9 @@ window.ICIMSEngine.runAutofill = async (profile) => {
 };
 
 const startICIMSEngine = () => {
-    chrome.storage.local.get(["autofillEnabled", "profileData"], (res) => {
-        if (res.autofillEnabled === false || !res.profileData) return;
+    window.FastApplyUtils.loadProfileData((profileData, autofillEnabled) => {
+        if (!autofillEnabled || !profileData) return;
+        const res = { profileData };
         let currentProfile = res.profileData;
         let pendingRun = 0;
         const run = () => window.ICIMSEngine.runAutofill(currentProfile);
@@ -310,3 +243,4 @@ if (document.readyState === "loading") {
 } else {
     startICIMSEngine();
 }
+})();

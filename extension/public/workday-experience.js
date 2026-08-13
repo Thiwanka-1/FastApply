@@ -24,19 +24,25 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
   const isAddButton = (button, currentCount) => {
     const text = buttonText(button);
-    if (currentCount === 0) {
-      return text === "add" || /^add (work experience|education|website|employment)$/i.test(text);
-    }
-    return text === "add another" || /^add another\b/i.test(text);
+    // Accept "Add", "Add Another", "+ Add", "Add Work Experience", localizable
+    // decorations stripped by normalizeText. The old exact-equality rules
+    // rejected e.g. "Add Another Work Experience" rendered at count 0.
+    if (!text || !/^add\b/.test(text)) return false;
+    if (/\b(file|attachment|resume|document|cover letter)\b/.test(text)) return false;
+    return true;
   };
 
-  W.getSectionEntryCount = (section, anchorPattern) => {
-    if (!section) return 0;
-    return W.querySection(section, "label")
+  W.getSectionEntryCount = (section, anchorPattern, sectionRoot = null) => {
+    const labels = sectionRoot
+      ? Array.from(sectionRoot.querySelectorAll("label"))
+      : (section ? W.querySection(section, "label") : []);
+    return labels
       .filter(W.isVisible)
       .filter(label => {
         anchorPattern.lastIndex = 0;
-        return anchorPattern.test(W.normalizeText(W.getElementText(label)));
+        return anchorPattern.test(
+          (W.normalizeQuestion || W.normalizeText)(W.getElementText(label))
+        );
       })
       .length;
   };
@@ -45,23 +51,38 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     section,
     sectionKeywords,
     expectedCount,
-    anchorPattern
+    anchorPattern,
+    sectionRoot = null
   }) => {
-    if (!section || expectedCount <= 0) return 0;
+    if ((!section && !sectionRoot) || expectedCount <= 0) return 0;
     const cappedExpected = Math.min(Number(expectedCount) || 0, 25);
     const blockedAdds = W.sectionAddBlocks || new Map();
     W.sectionAddBlocks = blockedAdds;
 
     let liveSection = resolveSection(section, sectionKeywords);
-    let currentCount = W.getSectionEntryCount(liveSection, anchorPattern);
+    const liveRoot = () => (sectionRoot?.isConnected ? sectionRoot : null);
+    let currentCount = W.getSectionEntryCount(liveSection, anchorPattern, liveRoot());
     let additionsAttempted = 0;
 
-    while (liveSection && currentCount < cappedExpected && additionsAttempted < cappedExpected) {
+    while (
+      (liveSection || liveRoot()) &&
+      currentCount < cappedExpected &&
+      additionsAttempted < cappedExpected
+    ) {
       const sectionKey = getSectionKey(liveSection, sectionKeywords);
-      const signature = `${cappedExpected}:${currentCount}`;
-      if (blockedAdds.get(sectionKey) === signature) break;
+      const blockKey = `${sectionKey}|${cappedExpected}:${currentCount}`;
+      // Two strikes per exact state instead of a permanent block: one flaky
+      // click (React re-render mid-add) must not disable the section forever.
+      if ((blockedAdds.get(blockKey) || 0) >= 2) {
+        W.debug?.("section add blocked after repeated failures:", blockKey);
+        break;
+      }
 
-      const buttons = W.querySection(liveSection, "button").filter(W.isVisible);
+      const root = liveRoot();
+      const buttons = (root
+        ? Array.from(root.querySelectorAll("button"))
+        : W.querySection(liveSection, "button")
+      ).filter(W.isVisible);
       const addButton = buttons.find(button => isAddButton(button, currentCount));
 
       if (!addButton || addButton.dataset.fa_add_processing === "true") {
@@ -75,24 +96,24 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
       if (!clicked) {
         delete addButton.dataset.fa_add_processing;
-        blockedAdds.set(sectionKey, signature);
+        blockedAdds.set(blockKey, (blockedAdds.get(blockKey) || 0) + 1);
         break;
       }
 
       const increasedCount = await W.waitFor(() => {
         liveSection = resolveSection(liveSection, sectionKeywords);
-        const count = W.getSectionEntryCount(liveSection, anchorPattern);
+        const count = W.getSectionEntryCount(liveSection, anchorPattern, liveRoot());
         return count > countBeforeClick ? count : null;
       }, { timeout: 6500, interval: 180 });
 
       if (addButton.isConnected) delete addButton.dataset.fa_add_processing;
 
       if (!increasedCount) {
-        blockedAdds.set(sectionKey, signature);
+        blockedAdds.set(blockKey, (blockedAdds.get(blockKey) || 0) + 1);
         break;
       }
 
-      blockedAdds.delete(sectionKey);
+      blockedAdds.delete(blockKey);
       currentCount = increasedCount;
       await W.wait(250);
     }
@@ -316,7 +337,20 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
       await fillWebsites(profile);
       if (W.handleWork) await W.handleWork(workHistory);
-      if (W.handleEducation) await W.handleEducation(educationHistory);
+
+      if (W.handleEducation && educationHistory.length) {
+        // handleWork may have just added rows; let React settle before
+        // scanning the education section — filling it mid-re-render silently
+        // no-oped on the first automatic pass (observed live).
+        await W.wait(400);
+        let educationDone = await W.handleEducation(educationHistory);
+        if (!educationDone) {
+          W.debug?.("education pass incomplete; retrying once after settle");
+          await W.wait(700);
+          educationDone = await W.handleEducation(educationHistory);
+        }
+      }
+
       if (W.handleSkills) await W.handleSkills(skills);
 
       W.lastReconciliationIssues = W.collectReconciliationIssues(profile);

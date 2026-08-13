@@ -1934,9 +1934,12 @@ const evidenceValueSupportsAnswer = ({
       return true;
     }
 
-    if (/\b(date|from|to|start|end|graduat)\b/.test(label)) {
-      const answerDate = canonicalApplicationDate(answerItem);
-      return Boolean(answerDate) && evidenceValues.some(item => {
+    // Not gated on the label: date-valued answers must be comparable as dates
+    // even when the label says "Employment Period" or similar wording the
+    // keyword list above does not anticipate.
+    const answerDate = canonicalApplicationDate(answerItem);
+    if (answerDate) {
+      return evidenceValues.some(item => {
         const evidenceDate = canonicalApplicationDate(item);
         if (!evidenceDate) return false;
         if (answerDate === evidenceDate) return true;
@@ -1967,7 +1970,8 @@ const PROFILE_EVIDENCE_LABEL_RULES = [
   [/websitesandskills\.github$/i, /\bgithub\b/i],
   [/websitesandskills\.(portfolio|twitter|facebook)$/i, /\b(portfolio|twitter|facebook|website|url)\b/i],
   [/websitesandskills\.skills$/i, /\bskills?\b/i],
-  [/workhistory\.\d+\.jobtitle$/i, /\b(job|position|role) title\b/i],
+  [/personalinfo\.languages(\.\d+.*)?$/i, /\b(language|fluen|proficien)/i],
+  [/workhistory\.\d+\.jobtitle$/i, /\btitle\b/i],
   [/workhistory\.\d+\.company$/i, /\b(company|employer)\b/i],
   [/workhistory\.\d+\.location$/i, /\b(location|city|country)\b/i],
   [/workhistory\.\d+\.employmenttype$/i, /\bemployment type\b/i],
@@ -1977,7 +1981,7 @@ const PROFILE_EVIDENCE_LABEL_RULES = [
   [/workhistory\.\d+\.currentlyworkhere$/i, /\b(current|currently work)\b/i],
   [/educationhistory\.\d+\.school$/i, /\b(school|university|institution)\b/i],
   [/educationhistory\.\d+\.degree$/i, /\bdegree\b/i],
-  [/educationhistory\.\d+\.(major|minor)$/i, /\b(major|minor|field|area) of study\b/i],
+  [/educationhistory\.\d+\.(major|minor)$/i, /\b(major|minor|discipline)\b|\b(field|area|program) of study\b/i],
   [/educationhistory\.\d+\.institutionlocation$/i, /\b(school|institution|education).*\blocation\b/i],
   [/educationhistory\.\d+\.gpa(scale)?$/i, /\b(gpa|grade point)\b/i],
   [/educationhistory\.\d+\.startdate$/i, /\b(from|start)\b/i],
@@ -2066,13 +2070,23 @@ const validateAgentEvidence = ({
       return true;
     }
 
-    return isProfileEvidenceRelevant(evidenceKey, field) &&
-      evidenceValueSupportsAnswer({
-        answerValue: answer?.value,
-        evidenceValue,
-        field,
-        evidenceKey
-      });
+    const valueSupported = evidenceValueSupportsAnswer({
+      answerValue: answer?.value,
+      evidenceValue,
+      field,
+      evidenceKey
+    });
+    if (!valueSupported) return false;
+    if (isProfileEvidenceRelevant(evidenceKey, field)) return true;
+
+    // The label whitelist is a heuristic, not proof of irrelevance. When the
+    // profile genuinely contains the cited value, accept the answer as
+    // review-required instead of blanking a correct answer because the
+    // tenant's label wording is not on the list.
+    const evidenceHasValue = Array.isArray(evidenceValue)
+      ? evidenceValue.length > 0
+      : String(evidenceValue ?? '').trim() !== '';
+    return evidenceHasValue ? 'review' : false;
   }
 
   if (source === 'applicationMemory') {
@@ -2493,6 +2507,10 @@ const normalizeGeneratedAnswers = (
       )
     );
 
+    // 'review' = the evidence value checks out but the field label was not on
+    // the relevance whitelist; keep the answer, flag it for the user.
+    const softAccepted = evidenceValid === 'review';
+
     return {
       fieldId: field.fieldId,
       label: field.label,
@@ -2500,11 +2518,12 @@ const normalizeGeneratedAnswers = (
       source: mapEvidenceSourceToStoredSource(
         rawAnswer.evidenceSource
       ),
-      confidence,
+      confidence: softAccepted ? Math.min(confidence, 0.6) : confidence,
       requiresReview:
-        rawAnswer.requiresReview === true,
-      reviewReason:
-        rawAnswer.requiresReview === true
+        softAccepted || rawAnswer.requiresReview === true,
+      reviewReason: softAccepted
+        ? 'The answer matches the profile, but the question wording could not be verified automatically.'
+        : rawAnswer.requiresReview === true
           ? cleanText(rawAnswer.reviewReason)
           : ''
     };

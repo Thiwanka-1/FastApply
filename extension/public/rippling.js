@@ -1,6 +1,10 @@
 // public/rippling.js
 console.log("[FastApply] Rippling Engine Active. (Fixed Scope Edition)");
 
+// Engine scripts share one isolated world; an IIFE keeps top-level
+// declarations from colliding with utils.js or other scripts.
+(() => {
+
 // --- RIPPLING BESPOKE COMBOBOX CLICKER ---
 const fillRipplingCombobox = (inputElement, targetValue) => {
   if (
@@ -227,8 +231,9 @@ const attemptAutofill = (profile) => {
 };
 
 const startEngine = () => {
-  chrome.storage.local.get(['autofillEnabled', 'profileData'], (res) => {
-    if (res.autofillEnabled === false || !res.profileData) return;
+  window.FastApplyUtils.loadProfileData((profileData, autofillEnabled) => {
+    if (!autofillEnabled || !profileData) return;
+    const res = { profileData };
     
     console.log("[FastApply] ⚡ Initiating Rippling form lock...");
     let attempts = 0;
@@ -251,3 +256,4 @@ window.FastApplyAgent2Controller?.register({
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startEngine);
 else startEngine();
+})();

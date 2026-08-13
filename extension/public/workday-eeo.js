@@ -52,7 +52,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     const radios = Array.from(container.querySelectorAll('input[type="radio"]'));
     if (radios.length) {
       if (radios.some(radio => radio.checked) || radios.some(isProtected)) return false;
-      return U.fillRadio(radios, choiceValue(target));
+      return U?.fillRadio?.(radios, choiceValue(target)) === true;
     }
 
     const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
@@ -63,11 +63,16 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       }
       const targets = Array.isArray(target) ? target : [target];
       return targets.some(value => {
-        return U.fillCheckbox(checkboxes, choiceValue(value));
+        return U?.fillCheckbox?.(checkboxes, choiceValue(value)) === true;
       });
     }
 
-    return W.fillDeterministicDropdown(container, choiceValue(target));
+    // The EEO wave loop re-visits every dropdown up to three times; cap the
+    // per-dropdown waits so unmatched dropdowns cannot consume minutes.
+    return W.fillDeterministicDropdown(container, choiceValue(target), {
+      openTimeout: 3000,
+      searchTimeout: 3500
+    });
   };
 
   const getStoredAnswer = (profile, question) => {
@@ -225,7 +230,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       const optOut = eeo.optOut === true;
       let filledAnything = false;
 
-      for (let wave = 0; wave < 5; wave += 1) {
+      for (let wave = 0; wave < 3; wave += 1) {
         const signatureBefore = getQuestionPageSignature();
         const labels = Array.from(document.querySelectorAll("label")).filter(W.isVisible);
         let filledThisWave = false;
@@ -261,7 +266,10 @@ window.WorkdayEngine = window.WorkdayEngine || {};
           } else if (question.includes("veteran")) {
             target = optOut ? "prefer not" : eeo.veteran;
           } else if (question.includes("disability")) {
-            target = optOut ? "I do not want to answer" : eeo.disability;
+            // Same opt-out phrasing as the other demographics; the semantic
+            // matcher classifies "prefer not" to the opt-out option whatever
+            // wording the tenant uses ("I don't wish to answer", …).
+            target = optOut ? "prefer not" : eeo.disability;
           }
 
           if (hasValue(target)) {

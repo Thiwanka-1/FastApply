@@ -1,14 +1,12 @@
 //generic.js
 console.log("[FastApply] Generic Universal Engine Active.");
 
-const U = window.FastApplyUtils;
-const A = window.FastApplyAgent2;
+// Engine scripts share one isolated world; an IIFE keeps top-level
+// declarations from colliding with utils.js or other scripts.
+(() => {
 
-let agent2InFlight = false;
-let agent2Timer = null;
-let lastAgent2Signature = "";
-let lastAgent2AttemptAt = 0;
-let currentApplicationId = "";
+const U = window.FastApplyUtils;
+
 
 const sendRuntimeMessage = request => {
   return new Promise(resolve => {
@@ -137,10 +135,11 @@ const getCountryAwareAnswer = (
     }
 
     if (country === "United States") {
-      return getMemoryValue(
-        memory,
-        "requiresUSSponsorship"
-      );
+      // The backend memory key is sponsorshipRequired (US is the default
+      // sponsorship question); "requiresUSSponsorship" never existed, so US
+      // sponsorship answers always came back empty.
+      return getMemoryValue(memory, "sponsorshipRequired") ||
+        getMemoryValue(memory, "requiresUSSponsorship");
     }
   }
 
@@ -190,8 +189,9 @@ const handleGenericCustoms = profile => {
     } else if (/email/i.test(labelText)) {
       targetValue = cInfo.email;
     } else if (/(phone|mobile|cell|telephone)/i.test(labelText)) {
-      targetValue = String(cInfo.phone || "")
-        .replace(/[^\d]/g, "");
+      // Preserve the international prefix; stripping to bare digits corrupted
+      // non-US numbers ("+94 71 …" became "9471…").
+      targetValue = U.formatPhoneNumber(cInfo.phone);
     } else if (/(address line 1|street address)/i.test(labelText)) {
       targetValue = cInfo.addressLine1;
     } else if (/city/i.test(labelText)) {
@@ -414,215 +414,6 @@ const looksLikeJobApplicationPage = () => {
   return hasApplicationLanguage || hasCandidateFields;
 };
 
-const setAgent2RunState = state => {
-  chrome.storage.local.set({
-    agent2RunState: {
-      ...state,
-      updatedAt: new Date().toISOString()
-    }
-  });
-};
-
-const buildAgentSignature = fields => {
-  return JSON.stringify(
-    fields.map(field => ({
-      fieldId: field.fieldId,
-      label: field.label,
-      type: field.type,
-      options: field.options
-    }))
-  );
-};
-
-const runAgent2ForRemainingFields = async () => {
-  if (agent2InFlight) return;
-
-  const fields = U.collectUnresolvedFields();
-
-  if (fields.length === 0) return;
-
-  const signature = buildAgentSignature(fields);
-  const now = Date.now();
-
-  if (
-    signature === lastAgent2Signature &&
-    now - lastAgent2AttemptAt < 30000
-  ) {
-    return;
-  }
-
-  lastAgent2Signature = signature;
-  lastAgent2AttemptAt = now;
-  agent2InFlight = true;
-
-  const deterministicFilled = document.querySelectorAll(
-    '[data-fa_filled="true"]:not([data-fa_agent_filled="true"])'
-  ).length;
-
-  const totalFields =
-    deterministicFilled + fields.length;
-
-  const jobContext = extractJobContext();
-  const startedAt = new Date().toISOString();
-
-  const payload = {
-    ...(currentApplicationId
-      ? { applicationId: currentApplicationId }
-      : {}),
-    atsPlatform: "generic",
-    jobContext,
-    scriptStats: {
-      totalFields,
-      scriptFilled: deterministicFilled
-    },
-    fields
-  };
-
-  setAgent2RunState({
-    status: "analysing",
-    applicationId: currentApplicationId,
-    pageUrl: window.location.href,
-    company: jobContext.company,
-    jobTitle: jobContext.jobTitle,
-    totalFields,
-    scriptFilled: deterministicFilled,
-    requestedFields: fields.length,
-    answered: 0,
-    reviewRequired: 0,
-    unresolved: fields.length,
-    error: "",
-    startedAt
-  });
-
-  console.log(
-    `[FastApply] Sending ${fields.length} unresolved fields to Agent 2.`
-  );
-
-  try {
-    const response = await sendRuntimeMessage({
-      action: "ANSWER_APPLICATION_FIELDS",
-      payload
-    });
-
-    if (!response?.success) {
-      const errorMessage =
-        response?.error ||
-        "Agent 2 request failed.";
-
-      setAgent2RunState({
-        status: "failed",
-        applicationId: currentApplicationId,
-        pageUrl: window.location.href,
-        company: jobContext.company,
-        jobTitle: jobContext.jobTitle,
-        totalFields,
-        scriptFilled: deterministicFilled,
-        requestedFields: fields.length,
-        answered: 0,
-        reviewRequired: 0,
-        unresolved: fields.length,
-        error: errorMessage,
-        startedAt,
-        completedAt: new Date().toISOString()
-      });
-
-      console.warn(
-        "[FastApply] Agent 2 request failed:",
-        errorMessage
-      );
-
-      return;
-    }
-
-    currentApplicationId =
-      response.data?.applicationId ||
-      currentApplicationId;
-
-    const summary = await U.applyAgentAnswers(
-      response.data?.answers || []
-    );
-
-    const resultSummary = {
-      applicationId: currentApplicationId,
-      status:
-        response.data?.status ||
-        "ready_for_review",
-      pageUrl: window.location.href,
-      company:
-        response.data?.jobContext?.company ||
-        jobContext.company ||
-        "",
-      jobTitle:
-        response.data?.jobContext?.jobTitle ||
-        jobContext.jobTitle ||
-        "",
-      totalFields,
-      scriptFilled: deterministicFilled,
-      requestedFields:
-        response.data?.requestedFields ||
-        fields.length,
-      answered: summary.answered,
-      reviewRequired:
-        summary.reviewRequired,
-      unresolved: summary.unresolved,
-      startedAt,
-      updatedAt: new Date().toISOString()
-    };
-
-    chrome.storage.local.set({
-      lastAgent2Summary: resultSummary
-    });
-
-    setAgent2RunState({
-      status: "complete",
-      ...resultSummary,
-      error: "",
-      completedAt: new Date().toISOString()
-    });
-
-    console.log(
-      "[FastApply] Agent 2 completed:",
-      summary
-    );
-  } catch (error) {
-    const errorMessage =
-      error?.message ||
-      "Unexpected Agent 2 failure.";
-
-    setAgent2RunState({
-      status: "failed",
-      applicationId: currentApplicationId,
-      pageUrl: window.location.href,
-      company: jobContext.company,
-      jobTitle: jobContext.jobTitle,
-      totalFields,
-      scriptFilled: deterministicFilled,
-      requestedFields: fields.length,
-      answered: 0,
-      reviewRequired: 0,
-      unresolved: fields.length,
-      error: errorMessage,
-      startedAt,
-      completedAt: new Date().toISOString()
-    });
-
-    console.error(
-      "[FastApply] Agent 2 unexpected error:",
-      error
-    );
-  } finally {
-    agent2InFlight = false;
-  }
-};
-
-const _scheduleAgent2 = () => {
-  clearTimeout(agent2Timer);
-
-  agent2Timer = setTimeout(() => {
-    runAgent2ForRemainingFields();
-  }, 1500);
-};
-
 const loadProfile = async () => {
   const stored = await getLocalStorage([
     "autofillEnabled",
@@ -741,3 +532,4 @@ if (document.readyState === "loading") {
 } else {
   startGenericEngine();
 }
+})();

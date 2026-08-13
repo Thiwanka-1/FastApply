@@ -1,6 +1,10 @@
 // public/ashby.js
 console.log("[FastApply] Ashby Engine Active.");
 
+// Engine scripts share one isolated world; an IIFE keeps top-level
+// declarations from colliding with utils.js or other scripts.
+(() => {
+
 const clickAshbyButton = (buttons, targetValue) => {
   if (!buttons || buttons.length === 0 || !targetValue) return false;
   if (buttons.some(button => {
@@ -199,8 +203,9 @@ const attemptAutofill = (profile) => {
 };
 
 const startEngine = () => {
-  chrome.storage.local.get(['autofillEnabled', 'profileData'], (res) => {
-    if (res.autofillEnabled === false || !res.profileData) return;
+  window.FastApplyUtils.loadProfileData((profileData, autofillEnabled) => {
+    if (!autofillEnabled || !profileData) return;
+    const res = { profileData };
     
     console.log("[FastApply] ⚡ Initiating Ashby form lock...");
     let attempts = 0;
@@ -223,3 +228,4 @@ window.FastApplyAgent2Controller?.register({
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startEngine);
 else startEngine();
+})();

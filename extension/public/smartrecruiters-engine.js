@@ -1,6 +1,10 @@
 // public/smartrecruiters-engine.js
 console.log("[FastApply] SmartRecruiters Shadow-Piercing Engine Active.");
 
+// Engine scripts share one isolated world; an IIFE keeps top-level
+// declarations from colliding with utils.js or other scripts.
+(() => {
+
 window.SREngine = window.SREngine || {};
 window.SREngine.wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -50,55 +54,10 @@ window.SREngine.findInputByLabelText = (text) => {
 };
 
 // --- 2. THE ANGULAR INJECTOR ---
-window.SREngine.setNativeValue = (element, value) => {
-    const utils = window.FastApplyUtils;
-    if (
-        !element ||
-        !value ||
-        element.dataset.fa_filled === "true" ||
-        utils?.isProtectedFromDeterministicFill?.(element)
-    ) return false;
-
-    const selected = element.tagName === "SELECT"
-        ? element.options?.[element.selectedIndex]
-        : null;
-    const selectedIsPlaceholder = selected && /^(select|select one|choose|choose one|please select|none)$/i.test(
-        String(selected.text || selected.label || selected.value || "").trim()
-    );
-    if (
-        (element.tagName === "SELECT" && selected && !selected.disabled && !selectedIsPlaceholder && String(selected.value || "").trim()) ||
-        (element.tagName !== "SELECT" && String(element.value || "").trim())
-    ) return false;
-
-    const label = String(utils?.getLabelText?.(element) || "").toLowerCase();
-    const target = element.type === "url" || /url|website|linkedin|github|portfolio/.test(label)
-        ? utils?.ensureHttpUrl?.(value)
-        : element.type === "tel" || /phone|telephone|mobile/.test(label)
-            ? utils?.formatPhoneNumber?.(value)
-            : String(value);
-    if (!target) return false;
-    
-    element.focus();
-    const prototype = element.tagName === "TEXTAREA"
-        ? window.HTMLTextAreaElement.prototype
-        : element.tagName === "SELECT"
-            ? window.HTMLSelectElement.prototype
-            : window.HTMLInputElement.prototype;
-    const nativeSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-    if (nativeSetter) {
-        nativeSetter.call(element, target);
-    } else {
-        element.value = target;
-    }
-
-    // CRITICAL: composed: true allows the event to escape the Shadow DOM so Angular knows we typed!
-    element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-    if (!String(element.value || "").trim()) return false;
-    element.dataset.fa_filled = "true";
-    utils?.setValueOwner?.(element, "deterministic");
-    return true;
-};
+// Delegates to the shared implementation in utils.js (identical logic
+// previously copy-pasted into each engine).
+window.SREngine.setNativeValue = (element, value) =>
+    window.FastApplyUtils.setEngineFieldValue(element, value);
 
 // --- 3. SECTION HANDLERS ---
 window.SREngine.fillPersonalInfo = async (profile) => {
@@ -259,8 +218,9 @@ window.SREngine.handleEducation = async (eduHistory) => {
 
 // --- ORCHESTRATOR LOOP ---
 const startSREngine = () => {
-    chrome.storage.local.get(["autofillEnabled", "profileData"], (res) => {
-        if (res.autofillEnabled === false || !res.profileData) return;
+    window.FastApplyUtils.loadProfileData((profileData, autofillEnabled) => {
+        if (!autofillEnabled || !profileData) return;
+        const res = { profileData };
         let currentProfile = res.profileData;
         let pendingRun = 0;
         const run = () => runSmartRecruitersDeterministic(currentProfile);
@@ -308,3 +268,4 @@ if (document.readyState === "loading") {
 } else {
     startSREngine();
 }
+})();

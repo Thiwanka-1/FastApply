@@ -139,6 +139,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       }, { timeout: 6500, interval: 180 });
 
       if (!match) {
+        W.debug?.("no lookup option matched:", target);
         if (W.normalizeText(input.value) === targetKey) W.setInputValue(input, "");
         W.closeDropdown(input);
         input.dataset.fa_lookup_failed_target = targetKey;
@@ -170,6 +171,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       });
 
       if (!confirmed) {
+        W.debug?.("lookup selection did not confirm:", target);
         input.dataset.fa_lookup_failed_target = targetKey;
         W.closeDropdown(input);
         return false;
@@ -214,8 +216,26 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     if (W.isEducating) return false;
 
     const sectionKeywords = ["education", "education history", "academic history"];
+    // Prefer Workday's own section container over heading-based boundaries;
+    // see the matching comment in handleWork.
+    const getSectionRoot = () => document.querySelector(
+      '[data-automation-id="educationSection"]'
+    );
+    let sectionRoot = getSectionRoot();
     let section = W.findSection(sectionKeywords);
-    if (!section) return false;
+    if (!section && !sectionRoot) {
+      // The section may still be rendering (typically right after work rows
+      // were added). Wait briefly before concluding it does not exist.
+      await W.waitFor(() => {
+        sectionRoot = getSectionRoot();
+        section = W.findSection(sectionKeywords);
+        return section || sectionRoot ? true : null;
+      }, { timeout: 3000, interval: 250 });
+    }
+    if (!section && !sectionRoot) {
+      W.debug?.("education section not found");
+      return false;
+    }
     W.isEducating = true;
 
     try {
@@ -223,15 +243,33 @@ window.WorkdayEngine = window.WorkdayEngine || {};
         section,
         sectionKeywords,
         expectedCount: educationHistory.length,
-        anchorPattern: EDUCATION_ANCHOR
+        anchorPattern: EDUCATION_ANCHOR,
+        sectionRoot
       });
 
+      // Wait for at least one education entry's anchor label to be visible;
+      // scanning while the rows are still mounting produced a silent no-op.
+      await W.waitFor(() => {
+        sectionRoot = getSectionRoot() || sectionRoot;
+        section = W.findSection(sectionKeywords) || section;
+        return W.getSectionEntryCount(
+          section,
+          EDUCATION_ANCHOR,
+          sectionRoot?.isConnected ? sectionRoot : null
+        ) >= 1
+          ? true
+          : null;
+      }, { timeout: 4000, interval: 200 });
+
       section = W.findSection(sectionKeywords) || section;
-      const labels = W.querySection(section, "label").filter(W.isVisible);
+      const labels = (sectionRoot?.isConnected
+        ? Array.from(sectionRoot.querySelectorAll("label"))
+        : W.querySection(section, "label")
+      ).filter(W.isVisible);
       const anchorIndexes = labels
         .map((label, index) => ({
           index,
-          question: W.normalizeText(W.getElementText(label))
+          question: (W.normalizeQuestion || W.normalizeText)(W.getElementText(label))
         }))
         .filter(item => matchesQuestion(EDUCATION_ANCHOR, item.question))
         .map(item => item.index);
@@ -244,7 +282,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
         const entryLabels = labels.slice(start, end);
 
         for (const label of entryLabels) {
-          const question = W.normalizeText(W.getElementText(label));
+          const question = (W.normalizeQuestion || W.normalizeText)(W.getElementText(label));
           const container = W.getFieldContainer(label);
           if (!container) continue;
           const input = getControl(label, container);
@@ -296,7 +334,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
         }
       }
 
-      return W.getSectionEntryCount(section, EDUCATION_ANCHOR) >= educationHistory.length;
+      return W.getSectionEntryCount(section, EDUCATION_ANCHOR, sectionRoot) >= educationHistory.length;
     } finally {
       W.isEducating = false;
     }

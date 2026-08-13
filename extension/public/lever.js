@@ -1,6 +1,10 @@
 // public/lever.js
 console.log("[FastApply] Lever Engine Active.");
 
+// Engine scripts share one isolated world; an IIFE keeps top-level
+// declarations from colliding with utils.js or other scripts.
+(() => {
+
 const handleCustomQuestions = (profile) => {
   let filledAnything = false;
   const pInfo = profile.personalInfo || {};
@@ -122,8 +126,9 @@ const attemptAutofill = (profile) => {
 };
 
 const startEngine = () => {
-  chrome.storage.local.get(['autofillEnabled', 'profileData'], (res) => {
-    if (res.autofillEnabled === false || !res.profileData) return;
+  window.FastApplyUtils.loadProfileData((profileData, autofillEnabled) => {
+    if (!autofillEnabled || !profileData) return;
+    const res = { profileData };
     let attempts = 0;
     const interval = setInterval(() => {
       attempts++;
@@ -140,3 +145,4 @@ window.FastApplyAgent2Controller?.register({
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startEngine);
 else startEngine();
+})();

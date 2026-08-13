@@ -421,7 +421,8 @@ const templateToJsonSchema = (value) => {
 
 const CORE_PROFILE_SCHEMA = templateToJsonSchema(CORE_PROFILE_TEMPLATE);
 
-const extractFirstJSONObject = (text) => {
+const extractBalancedJSONObjects = (text) => {
+  const objects = [];
   let start = -1;
   let depth = 0;
   let inString = false;
@@ -456,12 +457,13 @@ const extractFirstJSONObject = (text) => {
       depth--;
 
       if (depth === 0 && start !== -1) {
-        return text.slice(start, index + 1);
+        objects.push(text.slice(start, index + 1));
+        start = -1;
       }
     }
   }
 
-  return null;
+  return objects;
 };
 
 const sanitizeLLMOutput = (rawResponse) => {
@@ -477,26 +479,42 @@ const sanitizeLLMOutput = (rawResponse) => {
     ? rawResponse.trim()
     : JSON.stringify(rawResponse);
 
-  ['```json', '```JSON', '```javascript', '```js', '```'].forEach(marker => {
-    text = text.split(marker).join('');
-  });
+  // Pure JSON parses as-is; do this before any fence stripping so a literal
+  // ``` inside a string value is never corrupted.
+  try {
+    return JSON.parse(text);
+  } catch {}
 
-  text = text.trim();
+  // Strip markdown fences only at the boundaries of the payload (the old
+  // global split/join removed ``` sequences from inside string values too).
+  text = text
+    .replace(/^\s*```(?:json|javascript|js)?\s*\r?\n?/i, '')
+    .replace(/\r?\n?\s*```\s*$/, '')
+    .trim();
 
   try {
     return JSON.parse(text);
   } catch {
-    const jsonText = extractFirstJSONObject(text);
+    // Prose responses can embed example objects before the real payload; try
+    // every balanced object, largest first — the answer is almost always the
+    // biggest one that parses.
+    const candidates = extractBalancedJSONObjects(text)
+      .sort((first, second) => second.length - first.length);
 
-    if (!jsonText) {
+    if (!candidates.length) {
       throw new Error(`AI did not return valid JSON. Response: ${text.slice(0, 300)}`);
     }
 
-    try {
-      return JSON.parse(jsonText);
-    } catch (error) {
-      throw new Error(`AI returned malformed JSON: ${error.message}`);
+    let lastError = null;
+    for (const candidate of candidates) {
+      try {
+        return JSON.parse(candidate);
+      } catch (error) {
+        lastError = error;
+      }
     }
+
+    throw new Error(`AI returned malformed JSON: ${lastError?.message || 'unparseable'}`);
   }
 };
 
@@ -869,100 +887,6 @@ ${JSON.stringify(APPLICATION_MEMORY_TEMPLATE)}
 CANDIDATE DOCUMENTS:
 
 ${textContext}
-`.trim();
-
-  return { systemPrompt, userPrompt };
-};
-
-const buildAnswerPrompts = ({ candidateContext, jobContext, fields }) => {
-  const outputTemplate = {
-    answers: fields.map(field => ({
-      fieldId: field.fieldId,
-      value: '',
-      source: 'unknown',
-      confidence: 0,
-      requiresReview: true
-    }))
-  };
-
-  const systemPrompt = `
-You are Agent 2, a job-application completion assistant.
-
-Use the candidate profile, reusable application memory, document evidence and
-job context to answer unresolved application fields.
-
-ANSWER PRIORITY:
-
-1. Use an exact structured-profile value when available.
-2. Use an exact application-memory answer when available.
-3. Use explicit document evidence when available.
-4. Generate a customized answer only for open-ended writing questions.
-5. Return an empty value when the answer cannot be supported.
-
-FIELD RULES:
-
-1. For text and textarea fields, return a string.
-2. For select and radio fields, return exactly one supplied option.
-3. For checkbox groups and multi-select fields, return an array of exact options.
-4. For a single checkbox, return true or false only when supported.
-5. Never return an option that is not listed in the field's options.
-6. Do not change a field that already has a currentValue.
-7. Do not invent dates, employers, degrees, skills, salaries or certifications.
-8. Do not guess EEO, disability, veteran, legal, criminal-history, citizenship,
-   work-authorization, visa or sponsorship answers.
-9. Sensitive factual fields must come from stored profile data, application
-   memory or explicit document evidence.
-10. Questions such as "Why do you want to work here?" must use the supplied
-    job context and the candidate's real experience.
-11. Keep normal custom answers below 120 words unless the field specifies
-    another limit.
-12. Return raw JSON only.
-13. For work authorization, visa and sponsorship questions, identify the
-    country of the job before answering.
-
-14. Prefer country-specific application-memory keys such as:
-    authorizedToWorkUSA,
-    authorizedToWorkCanada,
-    requiresCanadaSponsorship,
-    and canadaWorkAuthorizationDetails.
-
-15. Never use a United States work-authorization answer for a Canadian job,
-    or a Canadian sponsorship answer for a United States job.
-
-16. When the job country cannot be determined, return an empty answer and set
-    requiresReview to true for country-specific authorization questions.
-
-SOURCE VALUES:
-
-- "profile"
-- "applicationMemory"
-- "documents"
-- "generated"
-- "unknown"
-
-CONFIDENCE:
-
-- 0.95 to 1.00: exact stored answer
-- 0.80 to 0.94: strongly supported by documents
-- 0.65 to 0.79: generated from relevant evidence
-- below 0.65: requires human review
-
-Set requiresReview to true for unknown answers, low-confidence answers and
-sensitive answers that are not exact stored matches.
-`.trim();
-
-  const userPrompt = `
-JOB CONTEXT:
-${JSON.stringify(jobContext)}
-
-UNRESOLVED APPLICATION FIELDS:
-${JSON.stringify(fields)}
-
-CANDIDATE CONTEXT:
-${JSON.stringify(candidateContext)}
-
-RETURN THIS STRUCTURE:
-${JSON.stringify(outputTemplate)}
 `.trim();
 
   return { systemPrompt, userPrompt };
@@ -1809,27 +1733,19 @@ const makeHuggingFaceRequest = async ({
     );
   }
 
-  try {
-    const parsed = sanitizeLLMOutput(content);
-
-    if (finishReason === 'length') {
-      console.warn(
-        `Hugging Face reached ${maxTokens} tokens for "${schemaName}", ` +
-        `but returned valid JSON.`
-      );
-    }
-
-    return parsed;
-  } catch (error) {
-    if (finishReason === 'length') {
-      throw new Error(
-        `Hugging Face returned incomplete JSON for "${schemaName}" ` +
-        `after reaching ${maxTokens} tokens.`
-      );
-    }
-
-    throw error;
+  // A truncated completion is never trustworthy, even when the fragment
+  // happens to be balanced JSON — for array payloads (e.g. form answers) it
+  // silently drops the tail. Fail loudly so the caller can retry or surface
+  // a clear error instead of quietly answering only some fields.
+  if (finishReason === 'length') {
+    throw new Error(
+      `Hugging Face returned an incomplete response for "${schemaName}" ` +
+      `after reaching ${maxTokens} tokens. Raise HF_WRITING_MAX_TOKENS or ` +
+      `reduce the batch size.`
+    );
   }
+
+  return sanitizeLLMOutput(content);
 };
 
 // ======================================================
@@ -1969,35 +1885,6 @@ export const extractProfileData = async (input) => {
 // AGENT 2 — CUSTOM APPLICATION ANSWERS
 // ======================================================
 
-const callHuggingFaceForAnswers = async (prompts) => {
-  try {
-    return await makeHuggingFaceRequest({
-      task: 'writing',
-      ...prompts,
-      temperature: 0.3
-    });
-  } catch (error) {
-    const writingModel = getHuggingFaceModel('writing');
-    const extractionModel = getHuggingFaceModel('extraction');
-
-    if (
-      writingModel !== extractionModel &&
-      error.message.includes('not supported by an enabled provider')
-    ) {
-      console.warn(`Writing model "${writingModel}" unavailable. Falling back to "${extractionModel}".`);
-
-      return makeHuggingFaceRequest({
-        task: 'writing',
-        ...prompts,
-        temperature: 0.3,
-        modelOverride: extractionModel
-      });
-    }
-
-    throw error;
-  }
-};
-
 export const generateFormAnswers = async ({
   candidateContext,
   jobContext,
@@ -2100,22 +1987,56 @@ EXAMPLES:
     fields
   });
 
-  return makeHuggingFaceRequest({
+  // Respect LLM_PROVIDER like every other entry point. This previously called
+  // Hugging Face unconditionally, so an ollama-configured install (the
+  // default) failed with a missing-HF-key error on every Agent 2 run.
+  const provider = getProvider();
+
+  if (provider === 'ollama') {
+    return await makeOllamaRequest({
+      task: 'writing',
+      systemPrompt,
+      userPrompt,
+      temperature: 0.1
+    });
+  }
+
+  if (!['huggingface', 'hugging-face', 'hf'].includes(provider)) {
+    throw new Error(
+      `Unsupported LLM provider for form answers: "${provider}". ` +
+      'Set LLM_PROVIDER=huggingface (with HF_API_KEY) or LLM_PROVIDER=ollama.'
+    );
+  }
+
+  const requestAnswers = (modelOverride) => makeHuggingFaceRequest({
     task: 'writing',
     systemPrompt,
     userPrompt,
     temperature: 0.1,
-    modelOverride:
-      process.env.HF_WRITING_MODEL ||
-      process.env.HF_EXTRACTION_MODEL ||
-      'openai/gpt-oss-120b',
-    maxTokensOverride: Number.parseInt(
-      process.env.HF_WRITING_MAX_TOKENS || '4000',
-      10
-    ),
-    reasoningEffortOverride:
-      process.env.HF_WRITING_REASONING || 'medium',
+    ...(modelOverride ? { modelOverride } : {}),
+    maxTokensOverride: getPositiveInteger(process.env.HF_WRITING_MAX_TOKENS, 4000),
+    reasoningEffortOverride: process.env.HF_WRITING_REASONING || 'medium',
     responseSchema: FORM_ANSWER_RESPONSE_SCHEMA,
     schemaName: 'job_application_answers'
   });
+
+  try {
+    // No modelOverride: getHuggingFaceModel('writing') applies the configured
+    // HF_WRITING_PROVIDER/HF_PROVIDER routing suffix, which the old inline
+    // env-var chain bypassed.
+    return await requestAnswers();
+  } catch (error) {
+    const writingModel = getHuggingFaceModel('writing');
+    const extractionModel = getHuggingFaceModel('extraction');
+
+    if (writingModel !== extractionModel && isUnsupportedModelError(error)) {
+      console.warn(
+        `Writing model "${writingModel}" unavailable for form answers. ` +
+        `Falling back to "${extractionModel}".`
+      );
+      return await requestAnswers(extractionModel);
+    }
+
+    throw error;
+  }
 };

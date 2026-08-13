@@ -239,7 +239,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
   const normalizeText = value => {
     return cleanText(value)
       .toLowerCase()
-      .replace(/[â€™']/g, "")
+      .replace(/[‘’ʼ']/g, "")
       .replace(/[^a-z0-9]+/g, " ")
       .trim();
   };

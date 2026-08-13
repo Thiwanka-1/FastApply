@@ -1,95 +1,24 @@
 // public/eightfold-engine.js
 console.log("[FastApply] Eightfold.ai Engine Active.");
 
+// Engine scripts share one isolated world; an IIFE keeps top-level
+// declarations from colliding with utils.js or other scripts.
+(() => {
+
 window.EightfoldEngine = window.EightfoldEngine || {};
 window.EightfoldEngine.wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Native React Injector
-window.EightfoldEngine.setNativeValue = (element, value) => {
-    const utils = window.FastApplyUtils;
-    if (
-        !element ||
-        !value ||
-        element.dataset.fa_filled === "true" ||
-        utils?.isProtectedFromDeterministicFill?.(element)
-    ) return false;
-
-    const selected = element.tagName === "SELECT"
-        ? element.options?.[element.selectedIndex]
-        : null;
-    const selectedIsPlaceholder = selected && /^(select|select one|choose|choose one|please select|none)$/i.test(
-        String(selected.text || selected.label || selected.value || "").trim()
-    );
-    if (
-        (element.tagName === "SELECT" && selected && !selected.disabled && !selectedIsPlaceholder && String(selected.value || "").trim()) ||
-        (element.tagName !== "SELECT" && String(element.value || "").trim())
-    ) return false;
-
-    const label = String(utils?.getLabelText?.(element) || "").toLowerCase();
-    const target = element.type === "url" || /url|website|linkedin|github|portfolio/.test(label)
-        ? utils?.ensureHttpUrl?.(value)
-        : element.type === "tel" || /phone|telephone|mobile/.test(label)
-            ? utils?.formatPhoneNumber?.(value)
-            : String(value);
-    if (!target) return false;
-    element.focus();
-    const prototype = element.tagName === "TEXTAREA"
-        ? window.HTMLTextAreaElement.prototype
-        : element.tagName === "SELECT"
-            ? window.HTMLSelectElement.prototype
-            : window.HTMLInputElement.prototype;
-    const nativeSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-    if (nativeSetter) {
-        nativeSetter.call(element, target);
-    } else {
-        element.value = target;
-    }
-    element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-    if (!String(element.value || "").trim()) return false;
-    element.dataset.fa_filled = "true";
-    utils?.setValueOwner?.(element, "deterministic");
-    return true;
-};
+// Delegates to the shared implementation in utils.js (identical logic
+// previously copy-pasted into each engine).
+window.EightfoldEngine.setNativeValue = (element, value) =>
+    window.FastApplyUtils.setEngineFieldValue(element, value);
 
 // Custom Fuzzy Matcher for Eightfold's specific EEO options
-window.EightfoldEngine.smartMatch = (optText, targetValue) => {
-    if (typeof window.FastApplyUtils?.smartMatch === "function") {
-        return window.FastApplyUtils.smartMatch(optText, targetValue);
-    }
-    const o = String(optText || "").toLowerCase().trim();
-    const t = String(targetValue || "").toLowerCase().trim();
-    if (!o || !t) return false;
-
-    if ((t.includes("decline") || t.includes("prefer not") || t.includes("not wish")) &&
-        (o.includes("decline") || o.includes("prefer not") || o.includes("not wish") || o.includes("choose not"))) return true;
-
-    if ((t === "male" || t === "man") && /\b(male|man)\b/i.test(o) && !/\b(female|woman)\b/i.test(o)) return true;
-    if ((t === "female" || t === "woman") && /\b(female|woman)\b/i.test(o)) return true;
-
-    if (t.includes("veteran") && o.includes("veteran")) {
-        const targetIsNo = t.includes("not") || t.includes("no");
-        const optIsNo = o.includes("not") || o.includes("no");
-        if (targetIsNo && optIsNo) return true;
-        if (!targetIsNo && !optIsNo) return true;
-    }
-
-    if (t.includes("disability") && o.includes("disability")) {
-        const targetIsNo = t.includes("not") || t.includes("no");
-        const optIsNo = o.includes("not") || o.includes("no");
-        if (targetIsNo && optIsNo) return true;
-        if (!targetIsNo && !optIsNo) return true;
-    }
-
-    if (t.startsWith("yes") && o.startsWith("yes")) return true;
-    if (t.startsWith("no") && o.startsWith("no")) return true;
-    if (t.includes("asian") && o.includes("asian")) return true;
-    if (t.includes("black") && (o.includes("black") || o.includes("african"))) return true;
-    if ((t.includes("hispanic") || t.includes("latino")) && (o.includes("hispanic") || o.includes("latino"))) return true;
-    if (t.includes("white") && o.includes("white")) return true;
-
-    return o === t || o.includes(t) || t.includes(o);
-};
+// utils.js always loads first, so the old inline fallback (a loose
+// substring matcher) was dead code with dangerous semantics if ever hit.
+window.EightfoldEngine.smartMatch = (optText, targetValue) =>
+    window.FastApplyUtils.smartMatch(optText, targetValue) === true;
 
 // Finds Inputs by explicitly stripping the red asterisks (*)
 window.EightfoldEngine.findInputByLabelText = (text) => {
@@ -215,8 +144,9 @@ window.EightfoldEngine.runAutofill = async (profile) => {
 
 // Main Orchestrator
 const startEightfoldEngine = () => {
-    chrome.storage.local.get(["autofillEnabled", "profileData"], (res) => {
-        if (res.autofillEnabled === false || !res.profileData) return;
+    window.FastApplyUtils.loadProfileData((profileData, autofillEnabled) => {
+        if (!autofillEnabled || !profileData) return;
+        const res = { profileData };
         let currentProfile = res.profileData;
         let pendingRun = 0;
         const run = () => window.EightfoldEngine.runAutofill(currentProfile);
@@ -258,3 +188,4 @@ if (document.readyState === "loading") {
 } else {
     startEightfoldEngine();
 }
+})();

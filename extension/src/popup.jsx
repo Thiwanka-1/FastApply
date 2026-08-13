@@ -108,9 +108,14 @@ function Popup() {
           profileFetchedAt:
             new Date().toISOString()
         });
-      } catch (_) {
+      } catch (error) {
         setIsLoggedIn(false);
-        await clearCachedProfile();
+        // Only a real auth rejection invalidates the cached profile. Clearing
+        // it on any failure (network blip, backend restart) silently disabled
+        // autofill on every page until the popup was opened again.
+        if (error?.response?.status === 401) {
+          await clearCachedProfile();
+        }
       }
     };
 

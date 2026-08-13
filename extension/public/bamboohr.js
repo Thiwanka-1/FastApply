@@ -1,6 +1,10 @@
 // public/bamboohr.js
 console.log("[FastApply] BambooHR Engine Active. (Revised Stable Edition)");
 
+// Engine scripts share one isolated world; an IIFE keeps top-level
+// declarations from colliding with utils.js or other scripts.
+(() => {
+
 let faBambooIsRunning = false;
 
 const normalizeText = (text) =>
@@ -307,8 +311,9 @@ const attemptAutofill = (profile) => {
 };
 
 const startEngine = () => {
-  chrome.storage.local.get(["autofillEnabled", "profileData"], (res) => {
-    if (res.autofillEnabled === false || !res.profileData) return;
+  window.FastApplyUtils.loadProfileData((profileData, autofillEnabled) => {
+    if (!autofillEnabled || !profileData) return;
+    const res = { profileData };
 
     console.log("[FastApply] ⚡ Initiating BambooHR form lock...");
     let attempts = 0;
@@ -340,3 +345,4 @@ if (document.readyState === "loading") {
 } else {
   startEngine();
 }
+})();

@@ -1,6 +1,10 @@
 // public/greenhouse.js
 console.log("[FastApply] Greenhouse Engine Active.");
 
+// Engine scripts share one isolated world; an IIFE keeps top-level
+// declarations from colliding with utils.js or other scripts.
+(() => {
+
 // Notice: smartMatch is removed from here because it now lives safely in utils.js!
 
 // --- REACT-SELECT GHOST CLICKER ---
@@ -117,10 +121,13 @@ const handleGreenhouseCustoms = (profile) => {
     }
 
     // --- 2. Custom Dropdowns ---
+    // Never `return` from inside this loop: an early return used to abort the
+    // whole pass after the first dropdown, so pages with several EEO
+    // dropdowns filled only one per polling attempt.
     const tryDropdown = (targetVal) => {
       if (fillReactDropdown(field, targetVal)) {
         filledAnything = true;
-        return true; 
+        return true;
       }
       return false;
     };
@@ -131,68 +138,52 @@ const handleGreenhouseCustoms = (profile) => {
     ) {
       const country = (cInfo.country || "").toLowerCase();
       const isUS = country === 'us' || country === 'usa' || country === 'united states' || country === 'america';
-      if (tryDropdown(isUS ? "Yes" : "No")) return true; 
+      tryDropdown(isUS ? "Yes" : "No");
     }
     // Work/Visa checks
     else if (questionText.includes('authorized to work') || questionText.includes('legally entitled') || questionText.includes('legal right to work')) {
-      if (tryDropdown(eeo.authorizedToWork)) return true;
+      tryDropdown(eeo.authorizedToWork);
     }
     else if (questionText.includes('visa sponsorship') || questionText.includes('require sponsorship') || questionText.includes('immigration sponsorship')) {
-      if (tryDropdown(eeo.requireVisaFuture)) return true;
+      tryDropdown(eeo.requireVisaFuture);
     }
-    
+
     // --- Demographic EEO ---
     else if ((questionText.includes('hispanic') || questionText.includes('latino') || questionText.includes('latinx')) && !questionText.includes('race')) {
       if (eeo.optOut) {
-        if (tryDropdown("decline")) return true;
+        tryDropdown("decline");
       } else if (eeo.ethnicity && eeo.ethnicity.trim() !== "") {
         const ethnicity = eeo.ethnicity.toLowerCase();
         const explicitlyNotHispanic = /\b(not|non)[\s-]+(hispanic|latino|latina|latinx)\b/.test(ethnicity);
         const explicitlyHispanic = !explicitlyNotHispanic &&
           /\b(hispanic|latino|latina|latinx)\b/.test(ethnicity);
-        if (explicitlyNotHispanic && tryDropdown("No")) return true;
-        if (explicitlyHispanic && tryDropdown("Yes")) return true;
+        if (explicitlyNotHispanic) tryDropdown("No");
+        else if (explicitlyHispanic) tryDropdown("Yes");
       }
     }
     else if ((questionText.includes('gender') || questionText.includes('sex') || questionText.includes('identify as')) && !questionText.includes('transgender') && !questionText.includes('sexual orientation') && !questionText.includes('ethnicity') && !questionText.includes('race') && !questionText.includes('hispanic')) {
-      if (tryDropdown(eeo.optOut ? "decline" : eeo.gender)) return true;
+      tryDropdown(eeo.optOut ? "decline" : eeo.gender);
     }
     else if (questionText.includes('race')) {
-      if (
-        tryDropdown(
-          eeo.optOut
-            ? "decline"
-            : eeo.race
-        )
-      ) {
-        return true;
-      }
+      tryDropdown(eeo.optOut ? "decline" : eeo.race);
     }
     else if (questionText.includes('ethnic')) {
-      if (
-        tryDropdown(
-          eeo.optOut
-            ? "decline"
-            : eeo.ethnicity
-        )
-      ) {
-        return true;
-      }
+      tryDropdown(eeo.optOut ? "decline" : eeo.ethnicity);
     }
     else if (questionText.includes('veteran')) {
-      if (tryDropdown(eeo.optOut ? "decline" : eeo.veteran)) return true;
+      tryDropdown(eeo.optOut ? "decline" : eeo.veteran);
     }
     else if (questionText.includes('disability')) {
-      if (tryDropdown(eeo.optOut ? "decline" : eeo.disability)) return true;
+      tryDropdown(eeo.optOut ? "decline" : eeo.disability);
     }
     else if (questionText.includes('transgender') && eeo.optOut) {
-      if (tryDropdown("decline")) return true;
+      tryDropdown("decline");
     }
     else if (questionText.includes('sexual orientation') && eeo.optOut) {
-      if (tryDropdown("decline")) return true;
+      tryDropdown("decline");
     }
     else if ((questionText.includes('parents/guardians') || questionText.includes('parents')) && eeo.optOut) {
-      if (tryDropdown("decline")) return true; 
+      tryDropdown("decline");
     }
   }
 
@@ -961,7 +952,8 @@ const markGreenhouseAgentState = (
 
 const resolveGreenhouseOption = (
   value,
-  options
+  options,
+  fieldLabel = ""
 ) => {
     const availableOptions =
       Array.isArray(options)
@@ -986,11 +978,32 @@ const resolveGreenhouseOption = (
           ) === normalizedValue
         );
       });
+    if (exactMatch) return exactMatch;
 
-    return exactMatch || window.FastApplyUtils.findBestSemanticMatch?.(
+    const semanticMatch = window.FastApplyUtils.findBestSemanticMatch?.(
       availableOptions,
       value
-    ) || "";
+    );
+    if (semanticMatch) return semanticMatch;
+
+    // Both call sites pass the question label (previously silently dropped by
+    // a two-parameter signature). Use it to break ties: drop option rows that
+    // merely repeat the question wording, then retry once.
+    const labelKey = normalizeGreenhouseText(fieldLabel);
+    if (labelKey) {
+      const filtered = availableOptions.filter(option => {
+        const optionKey = normalizeGreenhouseText(option);
+        return optionKey && optionKey !== labelKey;
+      });
+      if (filtered.length && filtered.length < availableOptions.length) {
+        return window.FastApplyUtils.findBestSemanticMatch?.(
+          filtered,
+          value
+        ) || "";
+      }
+    }
+
+    return "";
   };
 
 const findRenderedGreenhouseOption = (
@@ -1909,8 +1922,9 @@ const extractGreenhouseJobContext = () => {
 };
 
 const startEngine = () => {
-  chrome.storage.local.get(['autofillEnabled', 'profileData'], (res) => {
-    if (res.autofillEnabled === false || !res.profileData) return;
+  window.FastApplyUtils.loadProfileData((profileData, autofillEnabled) => {
+    if (!autofillEnabled || !profileData) return;
+    const res = { profileData };
     let attempts = 0;
     const interval = setInterval(() => {
       attempts++;
@@ -1955,3 +1969,4 @@ if (document.readyState === "loading") {
 } else {
   startEngine();
 }
+})();

@@ -8,28 +8,27 @@ const fieldOwnership = new Map();
 const getFieldOwnershipKey = element => {
   if (!element) return "";
 
-  const automationId = element.getAttribute?.("data-automation-id") || "";
-  const queryRoot = element.getRootNode?.() || document;
-  const tagName = element.tagName || "";
-  const elementOrdinal = tagName && queryRoot.querySelectorAll
-    ? Array.from(queryRoot.querySelectorAll(tagName)).indexOf(element)
-    : -1;
-  const pageKey = window.WorkdayEngine?.getPageKey?.() ||
-    window.location.pathname;
-  const identity = [
-    pageKey,
-    tagName,
-    element.getAttribute?.("type") || "",
+  const stableParts = [
     element.id || "",
     element.getAttribute?.("name") || "",
-    automationId,
+    element.getAttribute?.("data-automation-id") || "",
     element.getAttribute?.("aria-label") || "",
     element.getAttribute?.("aria-labelledby") || "",
-    getLabelText(element),
-    elementOrdinal
-  ].join("|");
+    getLabelText(element)
+  ];
 
-  return identity;
+  // Without a single stable attribute a shared key would collide with every
+  // other unnamed control — and a DOM-position key (the previous approach)
+  // shifts whenever a row is added, silently marking unrelated empty fields
+  // as user-owned. Such elements are tracked per-node via dataset only.
+  if (!stableParts.some(Boolean)) return "";
+
+  return [
+    window.location.pathname,
+    element.tagName || "",
+    element.getAttribute?.("type") || "",
+    ...stableParts
+  ].join("|");
 };
 
 const getValueOwner = element => {
@@ -481,12 +480,23 @@ const semanticTokensOf = value => normalizeSemanticText(value)
 const classifySemanticPolarity = text => {
   const value = normalizeText(text);
   if (!value) return "";
+  // normalizeText turns "don't" into "don t", so contracted opt-out phrasings
+  // need their own patterns — "I don't wish to answer" previously failed to
+  // classify and scored 0 against "decline"-style targets.
   if (
     value.includes("prefer not") ||
     value.includes("decline") ||
     value.includes("choose not") ||
     value.includes("do not wish") ||
-    value.includes("do not want")
+    value.includes("don t wish") ||
+    value.includes("dont wish") ||
+    value.includes("do not want") ||
+    value.includes("don t want") ||
+    value.includes("dont want") ||
+    value.includes("rather not") ||
+    value.includes("not to answer") ||
+    value.includes("not to disclose") ||
+    value.includes("not to self identify")
   ) return "optout";
   if (/\b(do not|does not|did not|will not|not agree|not acknowledge|not authorized|not willing)\b/.test(value)) {
     return "no";
@@ -557,10 +567,16 @@ const getSemanticMatchScore = (optionText, targetValue) => {
     if (!optionDegree || optionDegree !== targetDegree) return 0;
     const genericDegree = value => {
       const tokens = semanticTokensOf(value).filter(token => {
+        // Tokens of one or two characters are abbreviation debris from
+        // labels like "Bachelor's Degree (B.A., B.S., etc.)" — without this
+        // such options counted as "specific" and a target like "Bachelor of
+        // Engineering" matched nothing at all.
+        if (token.length <= 2) return false;
         return ![
           "degree", "degrees", "bachelor", "bachelors", "master", "masters",
           "doctor", "doctorate", "doctoral", "associate", "associates",
-          "certificate", "certification", "diploma", "s"
+          "certificate", "certification", "diploma", "etc", "hons",
+          "honours", "honors", "level"
         ].includes(token);
       });
       return tokens.length === 0;
@@ -854,6 +870,17 @@ const fillAutocomplete = (visibleInput, hiddenInput, value, options = {}) => {
       }
 
       setTimeout(() => {
+        // Slow-rendering suggestion lists get one more chance before the
+        // attempt is judged.
+        if (!suggestionSelected) {
+          for (const root of candidates) {
+            if (tryClickSuggestion(root, normalizedValue)) {
+              suggestionSelected = true;
+              break;
+            }
+          }
+        }
+
         const resolveLiveElement = element => {
           if (!element) return null;
           if (element.isConnected) return element;
@@ -880,20 +907,11 @@ const fillAutocomplete = (visibleInput, hiddenInput, value, options = {}) => {
         if (suggestionSelected && visibleRetained && hiddenRetained && valid) {
           markFilled(liveVisible, "autocomplete", source);
           if (liveHidden) markFilled(liveHidden, "hidden-autocomplete", source);
-        } else if (!isProtectedFromDeterministicFill(liveVisible)) {
-          // A typed search string is not a selected autocomplete value. Remove
-          // only our unchanged attempt so an invalid raw location is never
-          // stranded as an apparently completed field.
-          if (normalizeText(getElementCurrentValue(liveVisible)) === normalizeText(normalizedValue)) {
-            setNativeValue(liveVisible, "");
-            triggerEvents(liveVisible, {
-              withFocus: false,
-              withInput: true,
-              withChange: true,
-              withBlur: false
-            });
-          }
         }
+        // When no suggestion was committed, keep the typed text visible so
+        // the user can pick from the list themselves — erasing it here made
+        // location fields visibly fill and then go blank. The field stays
+        // unmarked, so agent passes still treat it as unresolved.
 
         delete visibleInput.dataset.fa_autocomplete_processing;
         if (liveVisible !== visibleInput) {
@@ -2080,10 +2098,103 @@ const applyAgentAnswers = async answers => {
   return summary;
 };
 
+// Shared "set a field value the way a user would" primitive. iCIMS,
+// SmartRecruiters and Eightfold each carried an identical private copy of
+// this; they now delegate here. composed:true lets the events escape shadow
+// DOM boundaries (SmartRecruiters renders inside closed Angular components).
+const setEngineFieldValue = (element, value) => {
+  if (
+    !element ||
+    !value ||
+    element.dataset.fa_filled === "true" ||
+    isProtectedFromDeterministicFill(element)
+  ) return false;
+
+  const selected = element.tagName === "SELECT"
+    ? element.options?.[element.selectedIndex]
+    : null;
+  const selectedIsPlaceholder = selected && /^(select|select one|choose|choose one|please select|none)$/i.test(
+    String(selected.text || selected.label || selected.value || "").trim()
+  );
+  if (
+    (element.tagName === "SELECT" && selected && !selected.disabled && !selectedIsPlaceholder && String(selected.value || "").trim()) ||
+    (element.tagName !== "SELECT" && String(element.value || "").trim())
+  ) return false;
+
+  const label = String(getLabelText(element) || "").toLowerCase();
+  const target = element.type === "url" || /url|website|linkedin|github|portfolio/.test(label)
+    ? ensureHttpUrl(value)
+    : element.type === "tel" || /phone|telephone|mobile/.test(label)
+      ? formatPhoneNumber(value)
+      : String(value);
+  if (!target) return false;
+  element.focus();
+
+  let proto = window.HTMLInputElement.prototype;
+  if (element.tagName === "TEXTAREA") {
+    proto = window.HTMLTextAreaElement.prototype;
+  } else if (element.tagName === "SELECT") {
+    proto = window.HTMLSelectElement.prototype;
+  }
+
+  const nativeSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+
+  if (nativeSetter) {
+    nativeSetter.call(element, target);
+  } else {
+    element.value = target;
+  }
+
+  element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+  element.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+  if (!String(element.value || "").trim()) return false;
+  element.dataset.fa_filled = "true";
+  setValueOwner(element, "deterministic");
+  return true;
+};
+
+// Resolves the cached profile, falling back to a background fetch when the
+// cache is empty (fresh install, popup never opened, cache cleared after a
+// transient auth failure). Engines previously read storage directly and
+// silently did nothing whenever the cache happened to be empty.
+const loadProfileData = callback => {
+  try {
+    chrome.storage.local.get(["autofillEnabled", "profileData"], values => {
+      if (values.autofillEnabled === false) {
+        callback(null, false);
+        return;
+      }
+      if (values.profileData) {
+        callback(values.profileData, true);
+        return;
+      }
+      try {
+        chrome.runtime.sendMessage({ action: "FETCH_PROFILE_DATA" }, response => {
+          if (chrome.runtime.lastError) {
+            callback(null, true);
+            return;
+          }
+          callback(response?.success && response.data ? response.data : null, true);
+        });
+      } catch (_) {
+        callback(null, true);
+      }
+    });
+  } catch (_) {
+    callback(null, true);
+  }
+};
+
 window.FastApplyUtils = {
   normalizeValue,
+  normalizeText,
   escapeRegex,
   smartMatch,
+  loadProfileData,
+  setNativeValue,
+  setEngineFieldValue,
+  triggerEvents,
   getSemanticMatchScore,
   findBestSemanticMatch,
   getLabelText,
