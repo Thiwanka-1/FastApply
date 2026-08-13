@@ -506,7 +506,13 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       })[0] || listbox;
   };
 
-  const closeSemanticDropdown = control => {
+  const closeSemanticDropdown = async control => {
+    // Close only what is actually open, and never dispatch a document-level
+    // Escape: a stray wizard-level keypress can throw the candidate out of
+    // Workday's apply overlay (seen as a reload back to the first step).
+    const listbox = getSemanticListbox(control);
+    if (!listbox || !isVisible(listbox)) return;
+
     control?.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "Escape",
@@ -514,13 +520,15 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         bubbles: true
       })
     );
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "Escape",
-        code: "Escape",
-        bubbles: true
-      })
-    );
+    await delay(120);
+
+    const stillOpen = getSemanticListbox(control);
+    if (stillOpen && isVisible(stillOpen)) {
+      // Outside click is the proven, side-effect-free Workday popup closer.
+      try {
+        document.body.click();
+      } catch (_) {}
+    }
   };
 
   const collectSemanticOptions = async listbox => {
@@ -599,7 +607,14 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
     ).filter(control => {
       return isVisible(control) &&
         !control.disabled &&
-        control.tagName !== "SELECT";
+        control.tagName !== "SELECT" &&
+        // Never touch site chrome: opening the account / language / nav
+        // menus is not form work and poking the account menu on Workday can
+        // disturb the candidate session.
+        !control.closest(
+          'header, nav, footer, [role="banner"], [role="navigation"], ' +
+          '[data-automation-id*="header" i], [data-automation-id*="navigation" i]'
+        );
     });
 
     return controls.filter(control => {
@@ -642,7 +657,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       openSemanticDropdown(control);
       const listbox = await waitForSemanticListbox(control);
       const options = await collectSemanticOptions(listbox);
-      closeSemanticDropdown(control);
+      await closeSemanticDropdown(control);
       await delay(160);
 
       const searchable = control.tagName === "INPUT" && Boolean(
@@ -993,7 +1008,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       answer.requiresReview = true;
       answer.reviewReason =
         "No unambiguous selectable option represented the supported answer.";
-      closeSemanticDropdown(field.control);
+      await closeSemanticDropdown(field.control);
       markSemanticState(field, "unresolved", answer.reviewReason);
       return { filled: false, unresolved: true };
     }
@@ -1183,7 +1198,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         answer.requiresReview = true;
         answer.reviewReason =
           "The exact option exists, but it could not be rendered for selection.";
-        closeSemanticDropdown(field.control);
+        await closeSemanticDropdown(field.control);
         markSemanticState(field, "unresolved", answer.reviewReason);
         return {
           filled: false,
@@ -1227,7 +1242,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       }
 
       if (!field.multiple) {
-        closeSemanticDropdown(field.control);
+        await closeSemanticDropdown(field.control);
         await delay(100);
       }
     }
@@ -1492,20 +1507,45 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
     agent2InFlight = true;
 
     /*
-     * Always perform a fresh scan first. This is important
-     * for Greenhouse and other single-page application sites
-     * where the URL or form can change without a full reload.
+     * Reuse a fresh scan of this exact page when one exists. The audit used
+     * to always re-sweep every dropdown (open → collect → close) even though
+     * the user typically just ran Inspect; on Workday that second rapid
+     * sweep could trip the tenant's session recovery, which threw the
+     * candidate back to step one of the wizard. With a reusable scan the
+     * audit touches nothing on the page until the answers arrive.
      */
-    let scanResponse;
+    let scanResponse = null;
 
     try {
-      scanResponse = await scanPage({ internal: true });
-    } catch (error) {
-      agent2InFlight = false;
-      return {
-        success: false,
-        error: error?.message || "The page audit failed."
-      };
+      const livePageKey = cleanText(
+        configuration?.getPageKey?.() || window.location.pathname
+      );
+      const scanAge = latestScan?.scannedAt
+        ? Date.now() - new Date(latestScan.scannedAt).getTime()
+        : Number.POSITIVE_INFINITY;
+      if (
+        latestScan &&
+        latestScan.pageKey === livePageKey &&
+        latestScan.pageIdentity === buildPageIdentity(getJobContext()) &&
+        Number.isFinite(scanAge) &&
+        scanAge < 3 * 60 * 1000
+      ) {
+        scanResponse = { success: true, data: latestScan };
+      }
+    } catch (_) {
+      scanResponse = null;
+    }
+
+    if (!scanResponse) {
+      try {
+        scanResponse = await scanPage({ internal: true });
+      } catch (error) {
+        agent2InFlight = false;
+        return {
+          success: false,
+          error: error?.message || "The page audit failed."
+        };
+      }
     }
 
     if (!scanResponse.success) {
@@ -1698,7 +1738,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       // selected. Audit those newly rendered fields automatically during the
       // same button click instead of making the applicant run Agent 2 again.
       if (configuration?.atsPlatform === "workday") {
-        for (let wave = 0; wave < 3; wave += 1) {
+        for (let wave = 0; wave < 2; wave += 1) {
           await delay(550);
 
           try {
@@ -1752,7 +1792,9 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       }
 
       await delay(350);
-      const postApplyFields = await collectFields();
+      // Stats only — use the cheap standard collection; a full semantic
+      // sweep here re-opened every dropdown a third time for numbers alone.
+      const postApplyFields = U.collectAuditableFields();
       const postApplyAuditable = postApplyFields.filter(field => {
         return field?.repairOnly !== true;
       });

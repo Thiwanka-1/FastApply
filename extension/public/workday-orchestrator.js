@@ -1,5 +1,9 @@
 // public/workday-orchestrator.js
-console.log("[FastApply] Workday Orchestrator Active.");
+console.log(
+  `[FastApply] Workday Orchestrator Active. (build ${
+    typeof FASTAPPLY_BUILD === "string" ? FASTAPPLY_BUILD : "unknown"
+  })`
+);
 
 window.WorkdayEngine = window.WorkdayEngine || {};
 
@@ -707,6 +711,12 @@ window.WorkdayEngine = window.WorkdayEngine || {};
   };
 
   W.closeDropdown = control => {
+    // Only send Escape when this control actually has an open popup that
+    // will consume it. A stray Escape bubbles up to Workday's apply overlay
+    // (its wizard listens at the container level) and can navigate the
+    // candidate out of the flow — observed as "the page reloads back to the
+    // first step" during audits.
+    if (!getControlledPopup(control)) return;
     for (const type of ["keydown", "keyup"]) {
       control?.dispatchEvent(new KeyboardEvent(type, {
         key: "Escape",
@@ -736,31 +746,15 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     const strategies = [
       // The pointer-sequence click is the opener proven against live
       // tenants; keep it first so alternate strategies never toggle an
-      // already-opening popup shut.
+      // already-opening popup shut. A synthetic-Enter strategy existed here
+      // once but is deliberately gone: a bubbling Enter can activate the
+      // wizard's primary "Save and Continue" action.
       () => W.clickElement(trigger),
       () => {
         try {
           trigger.scrollIntoView?.({ block: "nearest", inline: "nearest" });
           trigger.focus?.();
           trigger.click?.();
-          return true;
-        } catch (_) {
-          return false;
-        }
-      },
-      () => {
-        try {
-          trigger.focus?.();
-          for (const type of ["keydown", "keyup"]) {
-            trigger.dispatchEvent(new KeyboardEvent(type, {
-              key: "Enter",
-              code: "Enter",
-              keyCode: 13,
-              which: 13,
-              bubbles: true,
-              cancelable: true
-            }));
-          }
           return true;
         } catch (_) {
           return false;

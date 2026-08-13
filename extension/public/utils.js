@@ -1,5 +1,9 @@
 // public/utils.js
-console.log("[FastApply] Utils Loaded.");
+// Bump this stamp on every build: it prints in the console banner so a stale
+// extension load (Chrome runs the old copy until "Reload" is clicked in
+// chrome://extensions) is immediately visible.
+const FASTAPPLY_BUILD = "2026-08-13.3";
+console.log(`[FastApply] Utils Loaded. (build ${FASTAPPLY_BUILD})`);
 
 const normalizeValue = (value) => String(value ?? "").trim();
 

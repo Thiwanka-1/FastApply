@@ -147,11 +147,13 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     }
 
     const labels = Array.from(document.querySelectorAll("label")).filter(W.isVisible);
-    const labelIndex = labels.indexOf(label);
-    const previousQuestions = labels
-      .slice(Math.max(0, labelIndex - 4), labelIndex)
-      .map(item => W.normalizeText(W.getElementText(item)))
-      .join(" ");
+    const labelIndex = label ? labels.indexOf(label) : -1;
+    const previousQuestions = labelIndex > 0
+      ? labels
+          .slice(Math.max(0, labelIndex - 4), labelIndex)
+          .map(item => W.normalizeText(W.getElementText(item)))
+          .join(" ")
+      : "";
     const context = `${previousQuestions} ${question}`;
 
     if (/\bsponsorship\b|\bimmigration\b|\bvisa\b|\bwork permit\b/.test(context)) {
@@ -232,14 +234,46 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
       for (let wave = 0; wave < 3; wave += 1) {
         const signatureBefore = getQuestionPageSignature();
-        const labels = Array.from(document.querySelectorAll("label")).filter(W.isVisible);
         let filledThisWave = false;
 
-        for (const label of labels) {
+        // Build question blocks from visible <label> elements AND from
+        // label-less formFields. Tenants (including Workday's own careers
+        // site) render question text without <label>, exposing it only as
+        // the control's accessible name — the label-only loop saw nothing
+        // there and the page silently stayed empty.
+        const blocks = [];
+        const seenContainers = new Set();
+        for (const label of Array.from(document.querySelectorAll("label")).filter(W.isVisible)) {
           const question = W.normalizeText(W.getElementText(label));
           if (!question) continue;
           const container = W.getFieldContainer(label);
-          if (!container) continue;
+          if (!container || seenContainers.has(container)) continue;
+          seenContainers.add(container);
+          blocks.push({ question, label, container });
+        }
+        for (const field of Array.from(
+          document.querySelectorAll('[data-automation-id*="formField" i]')
+        ).filter(W.isVisible)) {
+          if (seenContainers.has(field)) continue;
+          const control = field.querySelector([
+            '[data-automation-id="selectWidget"]',
+            '[role="combobox"]',
+            '[aria-haspopup="listbox"]',
+            'input:not([type="hidden"])',
+            "textarea"
+          ].join(","));
+          if (!control) continue;
+          const question = W.normalizeText(U?.getLabelText?.(control) || "");
+          if (!question) continue;
+          seenContainers.add(field);
+          blocks.push({ question, label: null, container: field });
+        }
+
+        if (wave === 0) {
+          W.debug?.(`questions page: ${blocks.length} question blocks found`);
+        }
+
+        for (const { question, label, container } of blocks) {
           const textInput = getTextInput(label, container);
           const storedAnswer = getStoredAnswer(profile, question);
           const conditionalDetail = getConditionalDetailAnswer(profile, label, question);
@@ -276,6 +310,14 @@ window.WorkdayEngine = window.WorkdayEngine || {};
             const knownAnswerFilled = await fillChoice(container, target);
             filledThisWave = knownAnswerFilled || filledThisWave;
             filledAnything = knownAnswerFilled || filledAnything;
+            if (!knownAnswerFilled) {
+              W.debug?.(
+                "question not filled:",
+                question.slice(0, 70),
+                "→ target:",
+                choiceValue(target)
+              );
+            }
             if (knownAnswerFilled) continue;
           }
 
