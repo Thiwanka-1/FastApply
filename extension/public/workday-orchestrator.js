@@ -417,6 +417,22 @@ window.WorkdayEngine = window.WorkdayEngine || {};
         });
         return settled || true;
       }
+
+      // Single-select options unmount together with the popup the instant a
+      // click registers — there is no checked state left to read. Treat the
+      // disappearance as the success signal (previously this fell through to
+      // more click targets and reported "could not be clicked" even though
+      // the value was visibly selected on the page).
+      if (!option.isConnected || !W.isVisible(option)) {
+        if (typeof confirmSelection === "function") {
+          const settled = await W.waitFor(readConfirmation, {
+            timeout: finalTimeout,
+            interval: 120
+          });
+          if (settled) return settled;
+        }
+        return true;
+      }
     }
 
     const hasChoiceControl = Boolean(option.querySelector?.(
@@ -803,8 +819,15 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
     const currentValue = W.readDropdownValue(container, trigger);
     if (currentValue) {
-      return W.normalizeText(currentValue) === W.normalizeText(target) ||
+      const alreadyMatches =
+        W.normalizeText(currentValue) === W.normalizeText(target) ||
         U?.smartMatch?.(currentValue, target) === true;
+      if (alreadyMatches) return true;
+      // Pre-filled values are normally preserved; replaceValue is opted into
+      // for fields Workday pre-fills wrongly on its own (e.g. Country from
+      // the visitor's geo-IP rather than the candidate's profile).
+      if (settings.replaceValue !== true) return false;
+      W.debug("replacing pre-filled dropdown value:", currentValue, "→", target);
     }
     if (
       U?.isProtectedFromDeterministicFill?.(trigger) ||

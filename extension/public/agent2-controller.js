@@ -867,11 +867,15 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         configuration?.atsPlatform === "workday" &&
         window.WorkdayEngine?.selectWorkdayOption
       ) {
-        return Boolean(await window.WorkdayEngine.selectWorkdayOption(
+        const selected = await window.WorkdayEngine.selectWorkdayOption(
           option,
           null,
           { control }
-        ));
+        );
+        if (selected) return true;
+        // The click landed if the option unmounted with its popup; the
+        // caller verifies the resulting field value itself afterwards.
+        return !option.isConnected || !isVisible(option);
       }
       option.scrollIntoView?.({ block: "nearest", inline: "nearest" });
       if (typeof PointerEvent === "function") {

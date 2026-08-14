@@ -2156,6 +2156,40 @@ const validateAgentEvidence = ({
     return isNarrativeApplicationField(field);
   }
 
+  if (source === 'derived') {
+    // Derived answers reason from known facts (candidate country vs a
+    // sanctioned-country list, work history vs "do you use X"). Require the
+    // cited fact to actually exist and, for choice fields, the answer to be
+    // one of the offered options — then surface it as review-required
+    // instead of blanking the model's reasoning.
+    const referencedProfileValue = getNestedValue(
+      candidateContext.profile,
+      evidenceKey.replace(/^profile\./i, '')
+    );
+    const referencedMemoryEntry = findApplicationMemoryEntry(
+      candidateContext.applicationMemory,
+      evidenceKey
+    );
+    const factExists =
+      hasApplicationValue(referencedProfileValue) ||
+      hasApplicationValue(referencedMemoryEntry?.answer);
+    if (!factExists) return false;
+
+    const options = Array.isArray(field?.options) ? field.options : [];
+    if (options.length > 0) {
+      const values = Array.isArray(answer?.value) ? answer.value : [answer?.value];
+      const allMatchOptions = values.filter(hasApplicationValue).length > 0 &&
+        values.every(value => {
+          return options.some(option => {
+            return normalizeComparable(option) === normalizeComparable(value);
+          });
+        });
+      return allMatchOptions ? 'review' : false;
+    }
+
+    return hasApplicationValue(answer?.value) ? 'review' : false;
+  }
+
   return false;
 };
 
@@ -2410,7 +2444,7 @@ const mapEvidenceSourceToStoredSource = source => {
     return 'documents';
   }
 
-  if (source === 'generated') return 'generated';
+  if (source === 'generated' || source === 'derived') return 'generated';
 
   return 'unknown';
 };
@@ -2507,9 +2541,11 @@ const normalizeGeneratedAnswers = (
       )
     );
 
-    // 'review' = the evidence value checks out but the field label was not on
-    // the relevance whitelist; keep the answer, flag it for the user.
+    // 'review' = the answer is plausible but not literally evidenced (label
+    // not on the relevance whitelist, or a reasoned/derived answer); keep the
+    // answer and flag it for the user instead of blanking it.
     const softAccepted = evidenceValid === 'review';
+    const isDerived = cleanText(rawAnswer.evidenceSource) === 'derived';
 
     return {
       fieldId: field.fieldId,
@@ -2522,7 +2558,9 @@ const normalizeGeneratedAnswers = (
       requiresReview:
         softAccepted || rawAnswer.requiresReview === true,
       reviewReason: softAccepted
-        ? 'The answer matches the profile, but the question wording could not be verified automatically.'
+        ? isDerived
+          ? 'FastApply reasoned this answer from your profile data — please double-check it.'
+          : 'The answer matches the profile, but the question wording could not be verified automatically.'
         : rawAnswer.requiresReview === true
           ? cleanText(rawAnswer.reviewReason)
           : ''

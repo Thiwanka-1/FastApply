@@ -212,6 +212,59 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       : "";
   };
 
+  // Fills the CC-305 "Date" widget with today's date. Handles both the
+  // segmented MM / DD / YYYY inputs and a single MM/DD/YYYY text input.
+  const fillTodayDate = container => {
+    const today = new Date();
+    const month = String(today.getMonth() + 1).padStart(2, "0");
+    const day = String(today.getDate()).padStart(2, "0");
+    const year = String(today.getFullYear());
+
+    const findSegment = (kind, placeholder) => container.querySelector([
+      `input[data-automation-id="dateSection${kind}-input"]`,
+      `input[placeholder="${placeholder}" i]`,
+      `input[aria-label*="${kind.toLowerCase()}" i]`
+    ].join(","));
+
+    const writeSegment = (input, digits) => {
+      if (!input || input.disabled || input.readOnly) return false;
+      const current = String(input.value || "").replace(/\D/g, "");
+      if (current) return true;
+      W.setInputValue(input, digits);
+      if (String(input.value || "").replace(/\D/g, "") === digits) return true;
+      try {
+        input.focus();
+        input.select?.();
+        document.execCommand("insertText", false, digits);
+      } catch (_) {}
+      return String(input.value || "").replace(/\D/g, "") === digits;
+    };
+
+    const monthInput = findSegment("Month", "MM");
+    const dayInput = findSegment("Day", "DD");
+    const yearInput = findSegment("Year", "YYYY");
+
+    if (monthInput && dayInput && yearInput) {
+      const filled = writeSegment(monthInput, month) &&
+        writeSegment(dayInput, day) &&
+        writeSegment(yearInput, year);
+      if (!filled) W.debug?.("CC-305 date segments did not confirm");
+      return filled;
+    }
+
+    const singleInput = container.querySelector(
+      'input[placeholder*="MM/DD/YYYY" i], input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])'
+    );
+    if (singleInput) {
+      return W.fillDeterministicText(
+        singleInput,
+        `${month}/${day}/${year}`,
+        { typeCharacters: true }
+      );
+    }
+    return false;
+  };
+
   const getTextInput = (label, container) => {
     const linked = label?.control || (() => {
       const labelFor = label?.getAttribute?.("for");
@@ -231,6 +284,12 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       const eeo = profile.eeo || {};
       const optOut = eeo.optOut === true;
       let filledAnything = false;
+
+      // The CC-305 voluntary disability form carries required Name and Date
+      // fields alongside the disability checkboxes.
+      const isDisabilityForm = /\bcc[\s-]*305\b|self[\s-]identification of disability/i.test(
+        document.body?.innerText || ""
+      );
 
       for (let wave = 0; wave < 3; wave += 1) {
         const signatureBefore = getQuestionPageSignature();
@@ -291,9 +350,14 @@ window.WorkdayEngine = window.WorkdayEngine || {};
               : getSponsorshipAnswer(question, eeo);
           } else if (question.includes("gender")) {
             target = optOut ? "prefer not" : eeo.gender;
+          } else if (question.includes("race") && !question.includes("ethnicity")) {
+            // Race questions list race+ethnicity combos ("White (Not Hispanic
+            // or Latino)…"); an ethnicity-only value like "Not Hispanic or
+            // Latino" matches every row equally, so only a real race value is
+            // usable deterministically — otherwise leave it to the AI audit.
+            target = optOut ? "prefer not" : eeo.race;
           } else if (
             question.includes("ethnicity") ||
-            question.includes("race") ||
             question.includes("hispanic")
           ) {
             target = optOut ? "prefer not" : (eeo.ethnicity || eeo.race);
@@ -304,6 +368,32 @@ window.WorkdayEngine = window.WorkdayEngine || {};
             // matcher classifies "prefer not" to the opt-out option whatever
             // wording the tenant uses ("I don't wish to answer", …).
             target = optOut ? "prefer not" : eeo.disability;
+          } else if (
+            isDisabilityForm &&
+            /^(please check one of the boxes( below)?|check one of the boxes( below)?)$/.test(question)
+          ) {
+            // CC-305 phrases the disability choice as "Please check one of
+            // the boxes below:" without the word "disability" in the label.
+            target = optOut ? "prefer not" : eeo.disability;
+          } else if (isDisabilityForm && /^(name|your name|legal name)$/.test(question)) {
+            const personal = profile.personalInfo || {};
+            const fullName = [personal.firstName, personal.lastName]
+              .filter(Boolean)
+              .join(" ");
+            if (textInput && fullName) {
+              const nameFilled = W.fillDeterministicText(textInput, fullName);
+              filledThisWave = nameFilled || filledThisWave;
+              filledAnything = nameFilled || filledAnything;
+            }
+            continue;
+          } else if (
+            isDisabilityForm &&
+            /^(date|today s date|date signed)$/.test(question)
+          ) {
+            const dateFilled = fillTodayDate(container);
+            filledThisWave = dateFilled || filledThisWave;
+            filledAnything = dateFilled || filledAnything;
+            continue;
           }
 
           if (hasValue(target)) {

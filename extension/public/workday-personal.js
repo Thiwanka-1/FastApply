@@ -70,7 +70,12 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
     if (!trigger || hasProtectedOwner(trigger)) return false;
     const current = W.readDropdownValue?.(container, trigger) || "";
-    if (!W.isWorkdayPlaceholder(current)) return false;
+    if (!W.isWorkdayPlaceholder(current) && settings.replaceValue !== true) {
+      // Already holding a value: report success when it matches the target so
+      // wave loops and logs treat the field as done instead of failed.
+      return W.normalizeText(current) === W.normalizeText(target) ||
+        window.FastApplyUtils?.smartMatch?.(current, target) === true;
+    }
     return await W.fillWorkdayDropdown?.(container, target, settings) === true;
   });
 
@@ -301,7 +306,12 @@ window.WorkdayEngine = window.WorkdayEngine || {};
           (question === "country" || question.includes("country territory")) &&
           !question.includes("phone code")
         ) {
-          filledAnything = await W.fillDeterministicDropdown(container, country) || filledAnything;
+          // Workday pre-selects Country from the visitor's geo-IP; correct it
+          // to the profile country instead of accepting the default. (User
+          // manual selections stay protected by the ownership guards.)
+          filledAnything = await W.fillDeterministicDropdown(container, country, {
+            replaceValue: true
+          }) || filledAnything;
         } else if (question.includes("email address") || question === "email") {
           filledAnything = W.fillDeterministicText(input, contact.email) || filledAnything;
         }

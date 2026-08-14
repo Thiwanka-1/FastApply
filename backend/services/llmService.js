@@ -355,6 +355,7 @@ const FORM_ANSWER_RESPONSE_SCHEMA = {
               'cqfo',
               'coverLetter',
               'generated',
+              'derived',
               'none'
             ]
           },
@@ -1919,6 +1920,31 @@ EVIDENCE PRIORITY:
 4. CQFO raw text
 5. Cover-letter raw text
 6. Generated text based only on known candidate and job facts
+
+DERIVED ANSWERS:
+
+Some questions have no stored answer with matching wording but ARE answerable
+by reasoning from known candidate facts. Answer them with evidenceSource
+"derived", set evidenceKey to the profile or memory path the reasoning uses,
+and put one short reasoning sentence in evidenceQuote. Examples:
+
+- "Are you a citizen, national or resident of <list of countries>?" —
+  compare the candidate's country of residence/citizenship against the listed
+  countries and answer Yes or No accordingly.
+- "Are you authorized to work in the country where this job is located?" —
+  combine the job's country with the candidate's work-authorization answers.
+- "Do you use or work on <specific product or system>?" — answer from work
+  history and skills; No when nothing indicates its use.
+- "Are you related to an employee of <this employer>?" / "Have you previously
+  worked for <this employer>?" — No when nothing in the candidate data
+  mentions such a relationship or employment.
+- Acknowledgement questions that only ask the candidate to confirm they read
+  and answered truthfully (e.g. 'enter "yes" to acknowledge') — return the
+  requested acknowledgement.
+
+Derived answers must never contradict stored candidate data, and sensitive
+legal facts (criminal history, disability, protected-class details) must
+never be derived — without a stored answer those stay empty.
 
 STRICT RULES:
 

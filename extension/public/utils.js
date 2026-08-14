@@ -2,7 +2,7 @@
 // Bump this stamp on every build: it prints in the console banner so a stale
 // extension load (Chrome runs the old copy until "Reload" is clicked in
 // chrome://extensions) is immediately visible.
-const FASTAPPLY_BUILD = "2026-08-13.4";
+const FASTAPPLY_BUILD = "2026-08-14.2";
 console.log(`[FastApply] Utils Loaded. (build ${FASTAPPLY_BUILD})`);
 
 const normalizeValue = (value) => String(value ?? "").trim();
@@ -396,18 +396,23 @@ const classifyEthnicity = (text) => {
     return "optout";
   }
 
+  // Specific races first: combined labels like "White (Not Hispanic or
+  // Latino) (United States of America)" must classify by their race, not by
+  // the ethnicity qualifier — otherwise every option in a US race list
+  // collapses into "not_hispanic" and nothing can ever match uniquely.
+  if (t.includes("american indian") || t.includes("alaska native")) return "native";
+  if (t.includes("native hawaiian") || t.includes("pacific islander")) return "pacific";
+  if (t.includes("two or more races") || t.includes("multiracial")) return "multi";
+  if (t.includes("asian")) return "asian";
+  if (t.includes("black") || t.includes("african")) return "black";
+  if (t.includes("white") && !t.includes("not white")) return "white";
+
   if (
     /\b(not|non)\s+(hispanic|latino|latina|latinx)\b/.test(t) ||
     /\bno\b.*\b(hispanic|latino|latina|latinx)\b/.test(t)
   ) return "not_hispanic";
 
   if (t.includes("hispanic") || t.includes("latino") || t.includes("latinx")) return "hispanic";
-  if (t.includes("asian")) return "asian";
-  if (t.includes("black") || t.includes("african")) return "black";
-  if (t.includes("white") && !t.includes("not white")) return "white";
-  if (t.includes("american indian") || t.includes("alaska native")) return "native";
-  if (t.includes("native hawaiian") || t.includes("pacific islander")) return "pacific";
-  if (t.includes("two or more races") || t.includes("multiracial")) return "multi";
 
   return "";
 };
@@ -1076,9 +1081,7 @@ const fillRadio = (radioNodeList, targetText, options = {}) => {
         (!exactOnly && smartMatch(label, normalizedTarget))
       ) {
         if (!isChoiceChecked(radio)) {
-          radio.focus?.();
-          radio.click();
-          radio.dispatchEvent(new Event("change", { bubbles: true }));
+          clickChoiceInput(radio);
         }
 
         if (!isChoiceChecked(radio)) continue;
@@ -1106,6 +1109,67 @@ const fillRadio = (radioNodeList, targetText, options = {}) => {
   }
 
   return false;
+};
+
+// Radio/checkbox activation robust enough for styled inputs: the bare
+// input.click() is tried first, then the associated <label> (which usually
+// carries the real click handler when the input is visually replaced), then a
+// full pointer-event sequence on the input itself.
+const clickChoiceInput = input => {
+  const fireSequence = target => {
+    try {
+      if (typeof PointerEvent === "function") {
+        target.dispatchEvent(new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          pointerType: "mouse",
+          isPrimary: true
+        }));
+      }
+      target.dispatchEvent(new MouseEvent("mousedown", {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      }));
+      if (typeof PointerEvent === "function") {
+        target.dispatchEvent(new PointerEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          pointerType: "mouse",
+          isPrimary: true
+        }));
+      }
+      target.dispatchEvent(new MouseEvent("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      }));
+      target.click?.();
+    } catch (_) {}
+  };
+
+  try {
+    input.focus?.();
+    input.click();
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  } catch (_) {}
+  if (isChoiceChecked(input)) return true;
+
+  const queryRoot = input.getRootNode?.() || document;
+  let labelTarget = null;
+  if (input.id) {
+    try {
+      labelTarget = queryRoot.querySelector?.(`label[for="${CSS.escape(input.id)}"]`);
+    } catch (_) {}
+  }
+  labelTarget = labelTarget || input.closest?.("label");
+  if (labelTarget) {
+    fireSequence(labelTarget);
+    if (isChoiceChecked(input)) return true;
+  }
+
+  fireSequence(input);
+  return isChoiceChecked(input);
 };
 
 const fillCheckbox = (checkboxNodeList, targetText, options = {}) => {
@@ -1162,9 +1226,7 @@ const fillCheckbox = (checkboxNodeList, targetText, options = {}) => {
         (!exactOnly && smartMatch(label, normalizedTarget))
       ) {
         if (!isChoiceChecked(cb)) {
-          cb.focus?.();
-          cb.click();
-          cb.dispatchEvent(new Event("change", { bubbles: true }));
+          clickChoiceInput(cb);
         }
 
         if (!isChoiceChecked(cb)) continue;
