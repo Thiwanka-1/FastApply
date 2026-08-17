@@ -1567,7 +1567,10 @@ const getGeneratedContent = (response) => {
 };
 
 const getGeneratedReasoning = (response) => {
-  const reasoning = response.data?.choices?.[0]?.message?.reasoning_content;
+  const message = response.data?.choices?.[0]?.message;
+  // gpt-oss via the HF router reports reasoning under message.reasoning;
+  // other providers use message.reasoning_content.
+  const reasoning = message?.reasoning_content ?? message?.reasoning;
 
   if (typeof reasoning === 'string') return reasoning;
 
@@ -1686,10 +1689,24 @@ const makeHuggingFaceRequest = async ({
   let content = getGeneratedContent(response);
   let finishReason = response.data?.choices?.[0]?.finish_reason;
 
-  if (!content && getGeneratedReasoning(response)) {
+  const reasoningTokensUsed = () =>
+    response.data?.usage?.completion_tokens_details?.reasoning_tokens;
+
+  // Retry whenever the model produced no final answer after thinking —
+  // whether the reasoning arrived as text, or only as a token count with
+  // finish_reason "length" (gpt-oss burning the whole budget on reasoning).
+  const reasonedWithoutAnswer =
+    !content && (
+      Boolean(getGeneratedReasoning(response)) ||
+      finishReason === 'length' ||
+      (Number.isFinite(reasoningTokensUsed()) && reasoningTokensUsed() > 0)
+    );
+
+  if (reasonedWithoutAnswer) {
     console.warn(
-      `Hugging Face model "${model}" returned reasoning without a final answer ` +
-      `for "${schemaName}". Retrying once with thinking disabled.`
+      `Hugging Face model "${model}" returned no final answer ` +
+      `for "${schemaName}" (finish reason: ${finishReason || 'unknown'}, ` +
+      `cap: ${maxTokens}). Retrying with minimal reasoning and a larger budget.`
     );
 
     const retryPayload = {
@@ -1703,10 +1720,15 @@ const makeHuggingFaceRequest = async ({
         },
         { role: 'user', content: userContent || userPrompt }
       ],
-      reasoning_effort: 'none',
-      max_tokens: Math.max(
-        maxTokens,
-        getPositiveInteger(process.env.HF_REASONING_RETRY_MAX_TOKENS, 4500)
+      // gpt-oss models only accept low/medium/high — 'none' is ignored (or
+      // rejected), which would let the retry burn its budget on reasoning
+      // again. 'low' is honored across providers.
+      reasoning_effort: 'low',
+      // The retry gets its own, larger budget on TOP of the original cap
+      // instead of reusing the cap that just proved too small.
+      max_tokens: maxTokens + getPositiveInteger(
+        process.env.HF_REASONING_RETRY_MAX_TOKENS,
+        8000
       )
     };
 
@@ -1737,7 +1759,8 @@ const makeHuggingFaceRequest = async ({
     throw new Error(
       `Hugging Face model "${model}" returned no final answer for ` +
       `"${schemaName}"${finishReason ? ` (finish reason: ${finishReason})` : ''}` +
-      `${Number.isFinite(reasoningTokens) ? ` after ${reasoningTokens} reasoning tokens` : ''}.`
+      `${Number.isFinite(reasoningTokens) ? ` after ${reasoningTokens} reasoning tokens` : ''} ` +
+      `(completion cap: ${maxTokens} tokens).`
     );
   }
 

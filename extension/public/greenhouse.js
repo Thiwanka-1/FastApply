@@ -7,8 +7,14 @@ console.log("[FastApply] Greenhouse Engine Active.");
 
 // Notice: smartMatch is removed from here because it now lives safely in utils.js!
 
+const ghDebug = (...parts) => {
+  try {
+    console.debug("[FastApply:greenhouse]", ...parts);
+  } catch (_) {}
+};
+
 // --- REACT-SELECT GHOST CLICKER ---
-const fillReactDropdown = (fieldWrapper, targetValue) => {
+const fillReactDropdown = async (fieldWrapper, targetValue) => {
   if (fieldWrapper.dataset.fa_dropdown_processing === "true" || fieldWrapper.dataset.fa_filled === "true" || !targetValue) return false;
 
   const nativeSelect = fieldWrapper.querySelector('select');
@@ -65,31 +71,103 @@ const fillReactDropdown = (fieldWrapper, targetValue) => {
     return true;
   }
 
-  // Custom React comboboxes are deliberately left to the manual shared
-  // scanner. It can read the complete live option list before deciding,
-  // while a deterministic guess cannot safely distinguish split EEO values.
-  return false;
+  // Custom React combobox — the only dropdown type on the new
+  // my.greenhouse.io application UI. Reuse the same machinery the agent
+  // path uses: open, read the complete live option list (virtualized lists
+  // included), resolve the option semantically, click it and verify.
+  const control = getGreenhouseControl(fieldWrapper);
+  if (!control.input && !control.trigger) return false;
+  const ownerControl = control.input || control.trigger;
+  if (
+    window.FastApplyUtils.isProtectedFromDeterministicFill?.(ownerControl) ||
+    window.FastApplyUtils.isProtectedFromDeterministicFill?.(fieldWrapper)
+  ) return false;
+
+  // Preserve any real page/user selection.
+  const current = getGreenhouseCurrentValue(fieldWrapper, control);
+  if (current) return false;
+
+  // A dropdown that keeps failing (option truly absent, markup FastApply
+  // cannot drive) must not be re-opened on all 20 polling passes.
+  const tries = Number(fieldWrapper.dataset.fa_dropdown_tries || "0");
+  if (tries >= 3) return false;
+
+  fieldWrapper.dataset.fa_dropdown_processing = "true";
+  try {
+    const label = getGreenhouseFieldLabel(fieldWrapper);
+    const options = await readGreenhouseOptions(fieldWrapper);
+
+    if (!options.length) {
+      fieldWrapper.dataset.fa_dropdown_tries = String(tries + 1);
+      ghDebug(`dropdown "${label}": no options could be read`);
+      return false;
+    }
+
+    const exactOption = resolveGreenhouseOption(targetValue, options, label);
+    if (!exactOption) {
+      fieldWrapper.dataset.fa_dropdown_tries = String(tries + 1);
+      ghDebug(
+        `dropdown "${label}": no option matched "${targetValue}" among ${options.length} options`
+      );
+      return false;
+    }
+
+    const filled = await fillGreenhouseAgentDropdown(fieldWrapper, exactOption, {
+      source: "deterministic"
+    });
+
+    if (!filled) {
+      fieldWrapper.dataset.fa_dropdown_tries = String(tries + 1);
+      ghDebug(
+        `dropdown "${label}": option "${exactOption}" was clicked but the selection did not verify`
+      );
+      return false;
+    }
+
+    ghDebug(`dropdown "${label}": selected "${exactOption}"`);
+    delete fieldWrapper.dataset.fa_dropdown_tries;
+    fieldWrapper.style.border = '2px solid #8b5cf6';
+    return true;
+  } finally {
+    delete fieldWrapper.dataset.fa_dropdown_processing;
+  }
 };
 
 // --- GREENHOUSE CUSTOM FIELD MAPPER ---
-const handleGreenhouseCustoms = (profile) => {
+const handleGreenhouseCustoms = async (profile) => {
   let filledAnything = false;
   const pInfo = profile.personalInfo || {};
   const cInfo = profile.contactInfo || {};
   const eeo = profile.eeo || {};
   const links = profile.websitesAndSkills || {};
 
-  const fields = document.querySelectorAll('.field, .field-wrapper, .custom-field, .v2-make-it-custom, .select');
+  const memoryAnswer = key => {
+    const answers = profile.applicationMemory?.answers;
+    if (!Array.isArray(answers)) return "";
+    const entry = answers.find(item => item?.key === key);
+    const answer = entry?.answer;
+    return answer === null || answer === undefined ? "" : String(answer);
+  };
+
+  // getGreenhouseDropdownWrappers also matches the new my.greenhouse.io
+  // markup ([class*="field"], [data-testid*="field"]) that the old
+  // class-list selector missed entirely. Deepest wrappers first, so a leaf
+  // field always wins over a container that merely includes it.
+  const fields = getGreenhouseDropdownWrappers().sort((first, second) => {
+    return getGreenhouseWrapperDepth(second) - getGreenhouseWrapperDepth(first);
+  });
 
   for (let i = 0; i < fields.length; i++) {
     const field = fields[i];
     if (field.dataset.fa_filled === "true") continue;
+    if (!isGreenhouseVisible(field)) continue;
 
-    const labelTag = field.querySelector('label');
-    if (!labelTag) continue;
-    
-    const questionText = labelTag.innerText.toLowerCase();
-    const textInput = field.querySelector('input[type="text"]');
+    const questionText = getGreenhouseFieldLabel(field).toLowerCase();
+    if (!questionText) continue;
+    // Never treat a combobox's internal search input as a plain text field.
+    const textInput = field.querySelector(
+      'input[type="text"]:not([role="combobox"]):not([aria-haspopup="listbox"]):not([aria-autocomplete="list"])'
+    );
 
     // --- 1. Custom Text Inputs (Upgraded for Split Names) ---
     if (questionText.includes('preferred first name') && textInput) {
@@ -124,8 +202,8 @@ const handleGreenhouseCustoms = (profile) => {
     // Never `return` from inside this loop: an early return used to abort the
     // whole pass after the first dropdown, so pages with several EEO
     // dropdowns filled only one per polling attempt.
-    const tryDropdown = (targetVal) => {
-      if (fillReactDropdown(field, targetVal)) {
+    const tryDropdown = async (targetVal) => {
+      if (await fillReactDropdown(field, targetVal)) {
         filledAnything = true;
         return true;
       }
@@ -138,52 +216,72 @@ const handleGreenhouseCustoms = (profile) => {
     ) {
       const country = (cInfo.country || "").toLowerCase();
       const isUS = country === 'us' || country === 'usa' || country === 'united states' || country === 'america';
-      tryDropdown(isUS ? "Yes" : "No");
+      await tryDropdown(isUS ? "Yes" : "No");
     }
     // Work/Visa checks
     else if (questionText.includes('authorized to work') || questionText.includes('legally entitled') || questionText.includes('legal right to work')) {
-      tryDropdown(eeo.authorizedToWork);
+      await tryDropdown(eeo.authorizedToWork);
     }
     else if (questionText.includes('visa sponsorship') || questionText.includes('require sponsorship') || questionText.includes('immigration sponsorship')) {
-      tryDropdown(eeo.requireVisaFuture);
+      await tryDropdown(eeo.requireVisaFuture);
+    }
+    // Location / preferences. The question must actually ask WHICH country —
+    // "select the status that allows you to work and live in that country"
+    // also contains "country"+"live" but its options are visa statuses, so
+    // status/eligibility wording is excluded.
+    else if (
+      cInfo.country &&
+      (
+        /\b(choose|select|pick|enter|which)\b[^?]{0,25}\bcountry\b/.test(questionText) ||
+        questionText.includes('country of residence') ||
+        questionText.includes('country do you') ||
+        questionText.includes('country are you') ||
+        questionText.includes('country you are')
+      ) &&
+      !/\b(status|visa|permit|citizen|authoriz|eligib|sponsor)/.test(questionText)
+    ) {
+      await tryDropdown(cInfo.country);
+    }
+    else if (questionText.includes('relocat')) {
+      await tryDropdown(eeo.willingToRelocate || memoryAnswer('willingToRelocate'));
     }
 
     // --- Demographic EEO ---
     else if ((questionText.includes('hispanic') || questionText.includes('latino') || questionText.includes('latinx')) && !questionText.includes('race')) {
       if (eeo.optOut) {
-        tryDropdown("decline");
+        await tryDropdown("decline");
       } else if (eeo.ethnicity && eeo.ethnicity.trim() !== "") {
         const ethnicity = eeo.ethnicity.toLowerCase();
         const explicitlyNotHispanic = /\b(not|non)[\s-]+(hispanic|latino|latina|latinx)\b/.test(ethnicity);
         const explicitlyHispanic = !explicitlyNotHispanic &&
           /\b(hispanic|latino|latina|latinx)\b/.test(ethnicity);
-        if (explicitlyNotHispanic) tryDropdown("No");
-        else if (explicitlyHispanic) tryDropdown("Yes");
+        if (explicitlyNotHispanic) await tryDropdown("No");
+        else if (explicitlyHispanic) await tryDropdown("Yes");
       }
     }
     else if ((questionText.includes('gender') || questionText.includes('sex') || questionText.includes('identify as')) && !questionText.includes('transgender') && !questionText.includes('sexual orientation') && !questionText.includes('ethnicity') && !questionText.includes('race') && !questionText.includes('hispanic')) {
-      tryDropdown(eeo.optOut ? "decline" : eeo.gender);
+      await tryDropdown(eeo.optOut ? "decline" : eeo.gender);
     }
     else if (questionText.includes('race')) {
-      tryDropdown(eeo.optOut ? "decline" : eeo.race);
+      await tryDropdown(eeo.optOut ? "decline" : eeo.race);
     }
     else if (questionText.includes('ethnic')) {
-      tryDropdown(eeo.optOut ? "decline" : eeo.ethnicity);
+      await tryDropdown(eeo.optOut ? "decline" : eeo.ethnicity);
     }
     else if (questionText.includes('veteran')) {
-      tryDropdown(eeo.optOut ? "decline" : eeo.veteran);
+      await tryDropdown(eeo.optOut ? "decline" : eeo.veteran);
     }
     else if (questionText.includes('disability')) {
-      tryDropdown(eeo.optOut ? "decline" : eeo.disability);
+      await tryDropdown(eeo.optOut ? "decline" : eeo.disability);
     }
     else if (questionText.includes('transgender') && eeo.optOut) {
-      tryDropdown("decline");
+      await tryDropdown("decline");
     }
     else if (questionText.includes('sexual orientation') && eeo.optOut) {
-      tryDropdown("decline");
+      await tryDropdown("decline");
     }
     else if ((questionText.includes('parents/guardians') || questionText.includes('parents')) && eeo.optOut) {
-      tryDropdown("decline");
+      await tryDropdown("decline");
     }
   }
 
@@ -191,7 +289,7 @@ const handleGreenhouseCustoms = (profile) => {
 };
 
 // --- CORE ENGINE ---
-const attemptAutofill = (profile) => {
+const attemptAutofill = async (profile) => {
   const pInfo = profile.personalInfo || {};
   const cInfo = profile.contactInfo || {};
   let filledAnything = false;
@@ -216,7 +314,7 @@ const attemptAutofill = (profile) => {
     if (window.FastApplyUtils.fillAutocomplete(locationInput, hiddenLocationInput, locString)) filledAnything = true;
   }
 
-  if (handleGreenhouseCustoms(profile)) filledAnything = true;
+  if (await handleGreenhouseCustoms(profile)) filledAnything = true;
 
   return filledAnything;
 };
@@ -757,6 +855,14 @@ const getGreenhouseCurrentValue = (
 
   if (chipText) return chipText;
 
+  // The my.greenhouse.io combobox shows the selected option as the search
+  // input's resting value — without this read, selections were reported as
+  // empty and verification always failed on the new UI.
+  const inputValue = cleanGreenhouseText(control.input?.value);
+  if (inputValue && !/^(select|choose)\b/i.test(inputValue)) {
+    return inputValue;
+  }
+
   const triggerText =
     cleanGreenhouseText(
       control.trigger?.innerText ||
@@ -979,6 +1085,36 @@ const resolveGreenhouseOption = (
         );
       });
     if (exactMatch) return exactMatch;
+
+    // Known-equivalent names matched as whole options only (never prefixes:
+    // "us" as a prefix would grab "US Virgin Islands").
+    const VALUE_ALIASES = {
+      'united states': ['united states of america', 'usa', 'u s a', 'us'],
+      'usa': ['united states', 'united states of america'],
+      'united kingdom': ['uk', 'great britain'],
+      'uk': ['united kingdom']
+    };
+    const aliases = VALUE_ALIASES[normalizedValue] || [];
+    const aliasMatch = availableOptions.find(option => {
+      return aliases.includes(normalizeGreenhouseText(option));
+    });
+    if (aliasMatch) return aliasMatch;
+
+    // Country-style ties: "United States" scores identically against
+    // "United States of America" and "United States Minor Outlying Islands",
+    // so the semantic matcher refuses to choose. A multi-word target that is
+    // a whole-word PREFIX of some options resolves to the shortest of them.
+    if (normalizedValue.split(' ').length >= 2) {
+      const prefixMatches = availableOptions
+        .filter(option => {
+          return normalizeGreenhouseText(option).startsWith(`${normalizedValue} `);
+        })
+        .sort((first, second) => {
+          return normalizeGreenhouseText(first).length -
+            normalizeGreenhouseText(second).length;
+        });
+      if (prefixMatches.length) return prefixMatches[0];
+    }
 
     const semanticMatch = window.FastApplyUtils.findBestSemanticMatch?.(
       availableOptions,
@@ -1240,11 +1376,14 @@ const fillGreenhouseAgentDropdown =
     wrapper.dataset.fa_filled =
       "true";
 
-    wrapper.dataset.fa_agent_filled =
-      "true";
+    const fillSource =
+      settings.source === "deterministic" ? "deterministic" : "agent";
+    if (fillSource === "agent") {
+      wrapper.dataset.fa_agent_filled = "true";
+    }
 
     const ownerControl = control.nativeSelect || control.input || control.trigger || wrapper;
-    window.FastApplyUtils.setValueOwner?.(ownerControl, "agent");
+    window.FastApplyUtils.setValueOwner?.(ownerControl, fillSource);
 
     return true;
   };
@@ -1671,6 +1810,10 @@ const applyGreenhouseAgentAnswers =
             ? "FastApply could not read the available Greenhouse dropdown options."
             : `The stored answer "${originalValue}" did not safely match any available Greenhouse option.`;
 
+        ghDebug(
+          `agent: "${customField.label}" → ${answer.reviewReason}`
+        );
+
         markGreenhouseAgentState(
           customField.wrapper,
           "unresolved",
@@ -1768,6 +1911,10 @@ const applyGreenhouseAgentAnswers =
         answer.requiresReview = true;
         answer.reviewReason =
           "The exact Greenhouse option was found, but the page did not confirm that it was selected.";
+
+        ghDebug(
+          `agent: "${customField.label}" → option matched but selection did not verify`
+        );
 
         markGreenhouseAgentState(
           customField.wrapper,
@@ -1924,15 +2071,25 @@ const extractGreenhouseJobContext = () => {
 const startEngine = () => {
   window.FastApplyUtils.loadProfileData((profileData, autofillEnabled) => {
     if (!autofillEnabled || !profileData) return;
-    const res = { profileData };
     let attempts = 0;
-    const interval = setInterval(() => {
-      attempts++;
-      if (attemptAutofill(res.profileData)) console.log(`[FastApply] ✅ Greenhouse Autofill successful on attempt ${attempts}!`);
-      
-      if (attempts >= 20) {
-        clearInterval(interval);
-        console.log("[FastApply] 🏁 Greenhouse Autofill sequence completed.");
+    let passRunning = false;
+    const interval = setInterval(async () => {
+      // Dropdown passes are async (open, scroll, click, verify) — never let
+      // a new polling tick start while the previous one is still driving a
+      // dropdown, or two passes fight over the same open listbox.
+      if (passRunning) return;
+      passRunning = true;
+      try {
+        attempts++;
+        if (await attemptAutofill(profileData)) console.log(`[FastApply] ✅ Greenhouse Autofill successful on attempt ${attempts}!`);
+      } catch (error) {
+        console.warn("[FastApply] Greenhouse autofill pass failed:", error);
+      } finally {
+        passRunning = false;
+        if (attempts >= 20) {
+          clearInterval(interval);
+          console.log("[FastApply] 🏁 Greenhouse Autofill sequence completed.");
+        }
       }
     }, 500);
   });

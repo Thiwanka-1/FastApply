@@ -2,7 +2,7 @@
 // Bump this stamp on every build: it prints in the console banner so a stale
 // extension load (Chrome runs the old copy until "Reload" is clicked in
 // chrome://extensions) is immediately visible.
-const FASTAPPLY_BUILD = "2026-08-17.1";
+const FASTAPPLY_BUILD = "2026-08-17.5";
 console.log(`[FastApply] Utils Loaded. (build ${FASTAPPLY_BUILD})`);
 
 const normalizeValue = (value) => String(value ?? "").trim();
@@ -2054,15 +2054,32 @@ const fillAgentAnswer = async answer => {
             .filter(Boolean);
       const targetKeys = new Set(targetValues.map(normalizeText));
 
+      // A checked box counts as matching when its label is an exact OR
+      // semantic match of any target. Exact-text comparison alone deselected
+      // correct picks whenever the agent phrased the option slightly
+      // differently ("No, I don't have a disability" vs the full CC-305
+      // option text) — and the exact-only re-check could not restore them.
+      const matchesAnyTarget = checkbox => {
+        const label = getOptionLabel(checkbox);
+        if (targetKeys.has(normalizeText(label))) return true;
+        return targetValues.some(target => smartMatch(label, target) === true);
+      };
+
       field.elements.forEach(checkbox => {
-        const optionKey = normalizeText(getOptionLabel(checkbox));
-        if (isChoiceChecked(checkbox) && !targetKeys.has(optionKey)) {
+        if (isChoiceChecked(checkbox) && !matchesAnyTarget(checkbox)) {
           checkbox.click();
           checkbox.dispatchEvent(new Event("change", { bubbles: true }));
         }
       });
 
       filled = targetValues.length > 0 && targetValues.every(target => {
+        const alreadySatisfied = field.elements.some(checkbox => {
+          return isChoiceChecked(checkbox) && (
+            normalizeText(getOptionLabel(checkbox)) === normalizeText(target) ||
+            smartMatch(getOptionLabel(checkbox), target) === true
+          );
+        });
+        if (alreadySatisfied) return true;
         return fillCheckbox(field.elements, target, {
           force: true,
           source: "agent"

@@ -49,16 +49,56 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
   const fillChoice = async (container, target) => {
     if (!container || !hasValue(target) || isProtected(container)) return false;
-    const radios = Array.from(container.querySelectorAll('input[type="radio"]'));
+    let radios = Array.from(container.querySelectorAll('input[type="radio"]'));
+    let checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+
+    // The options do not always live inside the label's own field container:
+    // CC-305 renders the disability checkbox panel as a SIBLING of the
+    // "Please check one of the boxes below:" label, so the container search
+    // came back empty and the code fell into the dropdown path (which can
+    // only fail). When the container holds no choice inputs and no dropdown,
+    // widen the search upward and keep only the group nearest the question.
+    const hasDropdown = container.querySelector(
+      '[data-automation-id="selectWidget"], [role="combobox"], [aria-haspopup="listbox"], select'
+    );
+    if (!radios.length && !checkboxes.length && !hasDropdown) {
+      let scope = container;
+      for (let depth = 0; depth < 3; depth += 1) {
+        scope = scope.parentElement;
+        if (!scope) break;
+        radios = Array.from(scope.querySelectorAll('input[type="radio"]'));
+        checkboxes = Array.from(scope.querySelectorAll('input[type="checkbox"]'));
+        if (radios.length || checkboxes.length) break;
+      }
+      const nearestGroup = list => {
+        if (list.length < 2) return list;
+        const groupOf = input => input.closest(
+          'fieldset, [role="group"], [role="radiogroup"], [data-automation-id*="checkboxPanel" i], [data-automation-id*="checkboxGroup" i]'
+        );
+        const firstGroup = groupOf(list[0]);
+        return firstGroup ? list.filter(input => groupOf(input) === firstGroup) : list;
+      };
+      radios = nearestGroup(radios);
+      checkboxes = nearestGroup(checkboxes);
+      if (radios.length || checkboxes.length) {
+        W.debug?.(
+          `choice inputs found outside field container: ${radios.length} radios, ${checkboxes.length} checkboxes`
+        );
+      }
+    }
+
     if (radios.length) {
       if (radios.some(radio => radio.checked) || radios.some(isProtected)) return false;
       return U?.fillRadio?.(radios, choiceValue(target)) === true;
     }
 
-    const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
     if (checkboxes.length === 1) return fillSingleCheckbox(checkboxes[0], target);
     if (checkboxes.length > 1) {
-      if (checkboxes.some(checkbox => checkbox.checked) || checkboxes.some(isProtected)) {
+      // aria-checked covers Workday's styled checkboxes whose native .checked
+      // does not always reflect the visual state.
+      const isTicked = checkbox =>
+        checkbox.checked || checkbox.getAttribute?.("aria-checked") === "true";
+      if (checkboxes.some(isTicked) || checkboxes.some(isProtected)) {
         return false;
       }
       const targets = Array.isArray(target) ? target : [target];
@@ -216,7 +256,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       : "";
   };
 
-  // Fills the CC-305 "Date" widget with today's date. Handles both the
+  // Fills a "today's date" widget with the current date. Handles both the
   // segmented MM / DD / YYYY inputs and a single MM/DD/YYYY text input.
   const fillTodayDate = container => {
     const today = new Date();
@@ -224,24 +264,61 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     const day = String(today.getDate()).padStart(2, "0");
     const year = String(today.getFullYear());
 
-    const findSegment = (kind, placeholder) => container.querySelector([
-      `input[data-automation-id="dateSection${kind}-input"]`,
-      `input[placeholder="${placeholder}" i]`,
-      `input[aria-label*="${kind.toLowerCase()}" i]`
-    ].join(","));
+    // Selectors tried strictly in priority order — a comma-joined
+    // querySelector returns whichever element is first in the DOM, not the
+    // preferred selector, and previously grabbed the wrong segment.
+    const findSegment = (kind, placeholder) => {
+      const selectors = [
+        `input[data-automation-id="dateSection${kind}-input"]`,
+        `input[placeholder="${placeholder}" i]`,
+        `input[aria-label*="${kind.toLowerCase()}" i]`
+      ];
+      for (const selector of selectors) {
+        const found = container.querySelector(selector);
+        if (found) return found;
+      }
+      return null;
+    };
 
+    // Same strategy order as the proven work-experience date filler:
+    // Workday's masked segments revert plain value setters (React state stays
+    // empty), so the native editing pipeline goes FIRST, verified after each
+    // strategy. Because today's date is always the known-correct value, a
+    // mismatched pre-existing segment is replaced (select-all + insertText).
     const writeSegment = (input, digits) => {
       if (!input || input.disabled || input.readOnly) return false;
-      const current = String(input.value || "").replace(/\D/g, "");
-      if (current) return true;
-      W.setInputValue(input, digits);
-      if (String(input.value || "").replace(/\D/g, "") === digits) return true;
+      const matches = () =>
+        Number(String(input.value || "").replace(/\D/g, "")) === Number(digits);
+      if (matches()) return true;
+
       try {
         input.focus();
         input.select?.();
-        document.execCommand("insertText", false, digits);
+        if (document.execCommand("insertText", false, digits) && matches()) {
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        }
       } catch (_) {}
-      return String(input.value || "").replace(/\D/g, "") === digits;
+      if (matches()) return true;
+
+      try {
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          "value"
+        )?.set;
+        if (setter) setter.call(input, digits);
+        else input.value = digits;
+        input.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          data: digits,
+          inputType: "insertText"
+        }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } catch (_) {}
+      if (matches()) return true;
+
+      W.typeInputValue?.(input, digits);
+      return matches();
     };
 
     const monthInput = findSegment("Month", "MM");
@@ -252,7 +329,17 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       const filled = writeSegment(monthInput, month) &&
         writeSegment(dayInput, day) &&
         writeSegment(yearInput, year);
-      if (!filled) W.debug?.("CC-305 date segments did not confirm");
+      if (filled) {
+        for (const segment of [monthInput, dayInput, yearInput]) {
+          try {
+            segment.dataset.fa_filled = "true";
+            segment.dataset.fa_fill_type = "date";
+          } catch (_) {}
+          U?.setValueOwner?.(segment, "deterministic");
+        }
+      } else {
+        W.debug?.("today-date segments did not confirm");
+      }
       return filled;
     }
 
@@ -294,6 +381,57 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       const isDisabilityForm = /\bcc[\s-]*305\b|self[\s-]identification of disability/i.test(
         document.body?.innerText || ""
       );
+
+      // "Enter today's date" widgets whose prompt is plain paragraph text
+      // (e.g. the Massachusetts lie-detector acknowledgment) never surface a
+      // <label> or accessible name — the question-block loop cannot see them.
+      // Sweep every segmented date widget instead: climb from the widget to
+      // the surrounding text and fill with today when it asks for today's
+      // date. writeSegment also REPLACES a mismatched draft value (like a
+      // birth date written by an earlier run).
+      const fillTodayDateWidgets = () => {
+        let filledAny = false;
+        const monthInputs = Array.from(document.querySelectorAll(
+          'input[data-automation-id="dateSectionMonth-input"]'
+        )).filter(W.isVisible);
+
+        for (const monthInput of monthInputs) {
+          // Smallest ancestor containing the full MM/DD/YYYY widget.
+          let cell = monthInput.parentElement;
+          for (let depth = 0; cell && depth < 6; depth += 1) {
+            if (cell.querySelector('input[data-automation-id="dateSectionYear-input"]')) break;
+            cell = cell.parentElement;
+          }
+          if (!cell) continue;
+          // Only full-date widgets qualify; MM/YYYY widgets are work dates.
+          if (!cell.querySelector('input[data-automation-id="dateSectionDay-input"]')) continue;
+
+          let node = cell;
+          let asksToday = false;
+          for (let depth = 0; node && depth < 8; depth += 1) {
+            // Stop widening once the subtree spans another date widget — the
+            // surrounding text is no longer unambiguously about this one.
+            if (node.querySelectorAll(
+              'input[data-automation-id="dateSectionMonth-input"]'
+            ).length > 1) break;
+            const text = W.normalizeText(node.innerText || "");
+            if (/\btoday s date\b|\btodays date\b|\bcurrent date\b/.test(text)) {
+              asksToday = true;
+              break;
+            }
+            node = node.parentElement;
+          }
+          if (!asksToday) continue;
+
+          if (fillTodayDate(cell)) {
+            W.debug?.("today-date widget filled from page sweep");
+            filledAny = true;
+          }
+        }
+        return filledAny;
+      };
+
+      if (fillTodayDateWidgets()) filledAnything = true;
 
       for (let wave = 0; wave < 3; wave += 1) {
         const signatureBefore = getQuestionPageSignature();
@@ -338,6 +476,21 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
         for (const { question, label, container } of blocks) {
           const textInput = getTextInput(label, container);
+
+          // Any question asking for TODAY'S date (CC-305 signature date,
+          // "please enter today's date to acknowledge…" attestations) gets
+          // the current date — never a stored/remembered date like a birth
+          // date. Checked first so no stored-answer path can hijack it.
+          const asksTodayDate =
+            /\btoday'?s? date\b|\btoday s date\b|\bcurrent date\b/.test(question) ||
+            (isDisabilityForm && /^(date|date signed)$/.test(question));
+          if (asksTodayDate) {
+            const dateFilled = fillTodayDate(container);
+            filledThisWave = dateFilled || filledThisWave;
+            filledAnything = dateFilled || filledAnything;
+            continue;
+          }
+
           const storedAnswer = getStoredAnswer(profile, question);
           const conditionalDetail = getConditionalDetailAnswer(profile, label, question);
           let target;
@@ -389,14 +542,6 @@ window.WorkdayEngine = window.WorkdayEngine || {};
               filledThisWave = nameFilled || filledThisWave;
               filledAnything = nameFilled || filledAnything;
             }
-            continue;
-          } else if (
-            isDisabilityForm &&
-            /^(date|today s date|date signed)$/.test(question)
-          ) {
-            const dateFilled = fillTodayDate(container);
-            filledThisWave = dateFilled || filledThisWave;
-            filledAnything = dateFilled || filledAnything;
             continue;
           }
 
