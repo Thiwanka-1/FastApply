@@ -12,7 +12,10 @@ const Login = () => {
   const { user, login } = useContext(AuthContext);
   // DYNAMIC REDIRECT: Routes admins to /admin and normal users to /
   if (user) {
-    return <Navigate to={user.role === 'admin' ? '/admin' : '/'} replace />;
+    const destination =
+      user.role === 'superadmin' ? '/system-console' :
+      user.role === 'admin' ? '/admin' : '/';
+    return <Navigate to={destination} replace />;
   }
 
   const validateForm = () => {

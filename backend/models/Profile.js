@@ -154,7 +154,8 @@ const profileSchema = new mongoose.Schema(
       gender: { type: String, default: '' },
       ethnicity: { type: String, default: '' },
       race: { type: String, default: '' },
-      age: { type: String, default: '' }
+      age: { type: String, default: '' },
+      willingToRelocate: { type: String, default: '' }
     },
 
     // Reusable answers extracted mainly from the CQFO

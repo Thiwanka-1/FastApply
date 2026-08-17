@@ -109,6 +109,10 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     // employer rewrites the sentence completely. These mappings are narrow
     // and question-specific; unsupported/legal attestations remain empty.
     if (/\brelocat(e|ing|ion)\b/.test(target)) {
+      // The dashboard-editable profile field is authoritative; CQFO memory
+      // is the fallback for older profiles.
+      const direct = profile.eeo?.willingToRelocate;
+      if (hasValue(direct)) return direct;
       return findByKey("willingToRelocate");
     }
     if (/\bnon compete\b|\bnon solicitation\b/.test(target)) {

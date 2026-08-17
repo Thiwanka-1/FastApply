@@ -325,7 +325,8 @@ const normalizeExtractedProfile = (data = {}) => {
       gender: cleanText(data.eeo?.gender),
       ethnicity: cleanText(data.eeo?.ethnicity),
       race: cleanText(data.eeo?.race),
-      age: cleanText(data.eeo?.age)
+      age: cleanText(data.eeo?.age),
+      willingToRelocate: normalizeYesNo(data.eeo?.willingToRelocate)
     },
 
     applicationMemory: cleanApplicationMemory(data.applicationMemory)
@@ -861,6 +862,27 @@ const postProcessExtractedProfile = (profileData, documents) => {
       aliases: MEMORY_ALIASES.race,
       source: 'cqfo',
       sensitive: true,
+      confidence: 1
+    });
+  }
+
+  // Relocation lives both as a first-class profile field (editable on the
+  // dashboard) and as reusable application memory. Keep the two in sync so
+  // whichever side has the answer feeds the autofill engines.
+  const relocateAnswer = findMemoryAnswer(answers, 'willingToRelocate');
+
+  if (relocateAnswer && !cleanText(profileData.eeo.willingToRelocate)) {
+    profileData.eeo.willingToRelocate = cleanText(relocateAnswer.answer);
+  }
+
+  if (!relocateAnswer && cleanText(profileData.eeo.willingToRelocate)) {
+    upsertMemoryAnswer(answers, {
+      key: 'willingToRelocate',
+      question: 'Are you willing to relocate?',
+      answer: cleanText(profileData.eeo.willingToRelocate),
+      aliases: MEMORY_ALIASES.willingToRelocate,
+      source: 'cqfo',
+      sensitive: false,
       confidence: 1
     });
   }
@@ -2925,7 +2947,7 @@ export const clearEntireProfile = async (req, res, next) => {
       websitesAndSkills: { linkedin: '', github: '', twitter: '', portfolio: '', skills: [] },
       workHistory: [],
       educationHistory: [],
-      eeo: { optOut: false, authorizedToWork: '', requireVisaNow: '', requireVisaFuture: '', disability: '', veteran: '', gender: '', ethnicity: '', race: '', age: '' }
+      eeo: { optOut: false, authorizedToWork: '', requireVisaNow: '', requireVisaFuture: '', disability: '', veteran: '', gender: '', ethnicity: '', race: '', age: '', willingToRelocate: '' }
       // Note: We intentionally DO NOT clear the resume here. If they want to delete the file, they should do it explicitly.
     };
 
@@ -2955,7 +2977,7 @@ export const clearProfileSection = async (req, res, next) => {
       websitesAndSkills: { linkedin: '', github: '', twitter: '', portfolio: '', skills: [] },
       workHistory: [],
       educationHistory: [],
-      eeo: { optOut: false, authorizedToWork: '', requireVisaNow: '', requireVisaFuture: '', disability: '', veteran: '', gender: '', ethnicity: '', race: '', age: '' }
+      eeo: { optOut: false, authorizedToWork: '', requireVisaNow: '', requireVisaFuture: '', disability: '', veteran: '', gender: '', ethnicity: '', race: '', age: '', willingToRelocate: '' }
     };
 
     if (!validSections[sectionName]) {

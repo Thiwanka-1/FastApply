@@ -10,13 +10,20 @@ import profileRoutes from './routes/profileRoutes.js';
 import analyticsRoutes from './routes/analyticsRoutes.js'; // <-- ADD THIS
 import applicationRoutes from './routes/applicationRoutes.js';
 import aiUsageRoutes from './routes/aiUsageRoutes.js';
+import superAdminRoutes from './routes/superAdminRoutes.js';
+import seedSuperAdmin from './utils/seedSuperAdmin.js';
 // Load environment variables from .env file
 dotenv.config();
 
-// Initialize MongoDB connection
-connectDB();
+// Initialize MongoDB connection, then make sure the default super admin
+// exists (fresh databases get one automatically).
+connectDB().then(() => seedSuperAdmin());
 
 const app = express();
+
+// Behind a reverse proxy (production hosting) the real client IP arrives in
+// X-Forwarded-For; trust the first proxy so session logs record it.
+app.set('trust proxy', 1);
 
 const allowedOrigins = [
   process.env.CLIENT_URL,
@@ -70,6 +77,7 @@ app.use('/api/profile', profileRoutes);
 app.use('/api/analytics', analyticsRoutes); // <-- ADD THIS
 app.use('/api/applications', applicationRoutes);
 app.use('/api/ai-usage', aiUsageRoutes);
+app.use('/api/system', superAdminRoutes);
 
 // --- Global Error Handler ---
 // This prevents the server from crashing and sends clean errors to the frontend

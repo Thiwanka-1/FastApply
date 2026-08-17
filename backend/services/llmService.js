@@ -215,6 +215,12 @@ employment agreements, criminal-history answers and interview availability.
 ];
 
 const CQFO_RECOVERY_FIELDS = {
+  willingToRelocate: {
+    question: 'Are you willing to relocate?',
+    description: 'Return only Yes or No.',
+    sensitive: false
+  },
+
   otherCitizenshipOrResidency: {
     question: 'Are you a citizen of another country or hold permanent residency status?',
     description: 'Return only Yes or No.',
@@ -295,6 +301,7 @@ const CQFO_RECOVERY_FIELDS = {
 };
 
 const CQFO_APPLICATION_RECOVERY_KEYS = [
+  'willingToRelocate',
   'otherCitizenshipOrResidency',
   'salaryMinimum',
   'salaryMaximum',

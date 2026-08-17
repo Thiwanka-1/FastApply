@@ -23,8 +23,13 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ['user', 'admin'],
+      enum: ['user', 'admin', 'superadmin'],
       default: 'user', // Regular users get this by default
+    },
+    status: {
+      type: String,
+      enum: ['active', 'disabled'],
+      default: 'active',
     },
     settings: {
       autoClickNext: { type: Boolean, default: false },

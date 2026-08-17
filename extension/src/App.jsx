@@ -10,6 +10,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Analytics = lazy(() => import('./pages/Analytics'));
 const AdminDashboard = lazy(() => import('./pages/AdminDashboard'));
 const AccountSettings = lazy(() => import('./pages/AccountSettings'));
+const SystemConsole = lazy(() => import('./pages/SystemConsole'));
 
 function App() {
   return (
@@ -24,6 +25,12 @@ function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
+
+        {/* Standalone restricted console — never linked from any menu; the
+            page itself bounces anyone who is not authorized. */}
+        <Route element={<ProtectedRoute />}>
+          <Route path="/system-console" element={<SystemConsole />} />
+        </Route>
 
         {/* Wrap protected routes in the Layout component */}
         <Route element={<ProtectedRoute />}>

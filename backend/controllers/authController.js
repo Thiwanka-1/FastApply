@@ -1,6 +1,8 @@
 //authController.js
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import Session from '../models/Session.js';
 import Profile from '../models/Profile.js';
 import generateToken from '../utils/generateToken.js';
 import Application from '../models/Application.js';
@@ -34,7 +36,7 @@ const deleteFirebaseFiles = async storagePaths => {
   });
 };
 
-const deleteUserResources = async user => {
+export const deleteUserResources = async user => {
   const userId = user._id;
 
   const profile = await Profile.findOne({ user: userId })
@@ -49,6 +51,7 @@ const deleteUserResources = async user => {
     Application.deleteMany({ user: userId }),
     AIUsageLog.deleteMany({ user: userId }),
     AutofillLog.deleteMany({ user: userId }),
+    Session.deleteMany({ user: userId }),
     Profile.deleteOne({ user: userId })
   ]);
 
@@ -75,7 +78,7 @@ export const registerUser = async (req, res, next) => {
 
     if (user) {
       await Profile.create({ user: user._id }); // Create empty extension profile
-      generateToken(res, user._id);
+      await generateToken(res, user._id, req);
       res.status(201).json({ _id: user._id, name: user.name, email: user.email, role: user.role });
     } else {
       res.status(400);
@@ -90,7 +93,12 @@ export const loginUser = async (req, res, next) => {
     const user = await User.findOne({ email });
 
     if (user && (await user.matchPassword(password))) {
-      generateToken(res, user._id);
+      if (user.status === 'disabled') {
+        res.status(403);
+        throw new Error('This account has been disabled.');
+      }
+
+      await generateToken(res, user._id, req);
       res.status(200).json({ _id: user._id, name: user.name, email: user.email, role: user.role });
     } else {
       res.status(401);
@@ -99,7 +107,24 @@ export const loginUser = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-export const logoutUser = (req, res) => {
+export const logoutUser = async (req, res) => {
+  // Mark this device's session as ended so it shows correctly in the
+  // login history and the token can never be replayed.
+  const token = req.cookies?.jwt;
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      if (decoded.sid) {
+        await Session.updateOne(
+          { tokenId: decoded.sid, revokedAt: null },
+          { $set: { revokedAt: new Date(), revokedBy: 'logout' } }
+        );
+      }
+    } catch (_) {
+      // Expired/invalid token — nothing to revoke.
+    }
+  }
+
   res.cookie('jwt', '', { httpOnly: true, expires: new Date(0) });
   res.status(200).json({ message: 'Logged out successfully' });
 };
@@ -211,6 +236,13 @@ export const resetPassword = async (req, res, next) => {
     user.resetPasswordLastSentAt = null;
     await user.save();
 
+    // A password reset usually means the old credentials are not trusted —
+    // log every existing device out.
+    await Session.updateMany(
+      { user: user._id, revokedAt: null },
+      { $set: { revokedAt: new Date(), revokedBy: 'password-reset' } }
+    );
+
     res.status(200).json({
       message: 'Password reset successfully. You can now log in with your new password.'
     });
@@ -240,6 +272,18 @@ export const updateUserProfile = async (req, res, next) => {
       }
 
       const updatedUser = await user.save();
+
+      // Changing the password signs out every other device.
+      if (req.body.password) {
+        await Session.updateMany(
+          {
+            user: user._id,
+            revokedAt: null,
+            tokenId: { $ne: req.sessionRecord?.tokenId }
+          },
+          { $set: { revokedAt: new Date(), revokedBy: 'password-change' } }
+        );
+      }
       res.status(200).json({ _id: updatedUser._id, name: updatedUser.name, email: updatedUser.email, role: updatedUser.role });
     } else {
       res.status(404);
@@ -280,7 +324,9 @@ export const deleteUserProfile = async (req, res, next) => {
 
 export const getUsers = async (req, res, next) => {
   try {
-    const users = await User.find({}).select('-password');
+    // Super admin accounts are intentionally invisible to normal admins.
+    const users = await User.find({ role: { $ne: 'superadmin' } })
+      .select('-password');
     res.status(200).json(users);
   } catch (error) { next(error); }
 };
@@ -289,7 +335,9 @@ export const deleteUserByAdmin = async (req, res, next) => {
   try {
     const user = await User.findById(req.params.id);
 
-    if (!user) {
+    // Super admin accounts must stay invisible: report them exactly like a
+    // user that does not exist.
+    if (!user || user.role === 'superadmin') {
       res.status(404);
       throw new Error('User not found');
     }

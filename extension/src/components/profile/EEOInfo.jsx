@@ -11,6 +11,12 @@ const YES_NO_OPTIONS = [
   'Decline to Self-Identify'
 ];
 
+const RELOCATE_OPTIONS = [
+  '',
+  'Yes',
+  'No'
+];
+
 const GENDER_OPTIONS = [
   '',
   'Male',
@@ -224,6 +230,25 @@ export default function EEOInfo({
                 YES_NO_OPTIONS,
                 data.requireVisaFuture,
                 'requireVisaFuture'
+              )}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2">
+              Willing to relocate?
+            </label>
+
+            <select
+              name="willingToRelocate"
+              value={data.willingToRelocate || ''}
+              onChange={handleChange}
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3.5 text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 transition-all appearance-none"
+            >
+              {renderOptions(
+                RELOCATE_OPTIONS,
+                data.willingToRelocate,
+                'willingToRelocate'
               )}
             </select>
           </div>
