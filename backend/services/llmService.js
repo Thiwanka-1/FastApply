@@ -1971,6 +1971,11 @@ and put one short reasoning sentence in evidenceQuote. Examples:
 - Acknowledgement questions that only ask the candidate to confirm they read
   and answered truthfully (e.g. 'enter "yes" to acknowledge') — return the
   requested acknowledgement.
+- "What country do you intend to work from?" / "Where will you be working
+  from?" / "Where are you located?" — answer from the candidate's contact
+  location (city/state/country, evidenceSource "profile",
+  evidenceKey contactInfo.country or contactInfo.city). Include the city when
+  the question asks for city and country.
 
 Derived answers must never contradict stored candidate data, and sensitive
 legal facts (criminal history, disability, protected-class details) must

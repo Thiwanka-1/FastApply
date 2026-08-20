@@ -34,13 +34,21 @@ window.ICIMSEngine.findInputByLabelText = (text, contextKeyword = "", expectedTa
     }
 
     const labels = Array.from(searchArea.querySelectorAll('label, .iCIMS_Label'));
-    
-    // 1st Pass: Try exact match
-    let label = labels.find(l => (l.innerText || "").replace(/\*/g, '').trim().toLowerCase() === text.toLowerCase());
-    
-    // 2nd Pass: Try partial match (Crucial for long iCIMS questions!)
-    if (!label) {
-        label = labels.find(l => (l.innerText || "").replace(/\*/g, '').trim().toLowerCase().includes(text.toLowerCase()));
+    const cleanLabel = l => (l.innerText || "").replace(/\*/g, '').trim();
+
+    let label;
+    if (text instanceof RegExp) {
+        // Regex mode for long job-specific questions with tenant-specific
+        // wording ("Are you currently a CHA Employee?").
+        label = labels.find(l => text.test(cleanLabel(l)));
+    } else {
+        // 1st Pass: Try exact match
+        label = labels.find(l => cleanLabel(l).toLowerCase() === text.toLowerCase());
+
+        // 2nd Pass: Try partial match (Crucial for long iCIMS questions!)
+        if (!label) {
+            label = labels.find(l => cleanLabel(l).toLowerCase().includes(text.toLowerCase()));
+        }
     }
 
     if (label) {
@@ -74,17 +82,127 @@ window.ICIMSEngine.findInputByLabelText = (text, contextKeyword = "", expectedTa
 // Now passes 'select' as the expected tag to bypass the custom text box UI
 window.ICIMSEngine.fillSelectDropdown = (labelText, targetValue, contextKeyword = "") => {
     if (!targetValue) return false;
-    const select = window.ICIMSEngine.findInputByLabelText(labelText, contextKeyword, 'select'); 
+    const select = window.ICIMSEngine.findInputByLabelText(labelText, contextKeyword, 'select');
     if (!select || select.dataset.fa_filled === "true") return false;
+
+    // Respect an existing real selection (page default or user choice) —
+    // report whether it already matches instead of clobbering it.
+    const currentText = (select.options?.[select.selectedIndex]?.text || "").trim();
+    const isPlaceholder = !select.value ||
+        /make a selection|please select|select one|select a |^select\.{0,3}$|^--/i.test(currentText);
+    if (!isPlaceholder) {
+        return window.ICIMSEngine.smartMatch(currentText, targetValue);
+    }
 
     const options = Array.from(select.options);
     const match = options.find(o => window.ICIMSEngine.smartMatch(o.text, targetValue));
 
     if (match) {
         window.ICIMSEngine.setNativeValue(select, match.value);
-        return true; 
+        return true;
     }
     return false;
+};
+
+// Text fields are only ever filled when still empty.
+window.ICIMSEngine.fillTextByLabel = (labelText, value) => {
+    if (!value) return false;
+    const input = window.ICIMSEngine.findInputByLabelText(labelText);
+    if (!input || input.tagName === 'SELECT') return false;
+    if (String(input.value || '').trim()) return false;
+    window.ICIMSEngine.setNativeValue(input, value);
+    return true;
+};
+
+// Total years of professional experience, from the earliest work-history
+// start date to today (or the latest end date when nothing is current).
+window.ICIMSEngine.computeExperienceYears = (workHistory) => {
+    const parseFlexibleDate = raw => {
+        const text = String(raw || '').trim();
+        if (!text) return null;
+        const parsed = Date.parse(text);
+        if (!Number.isNaN(parsed)) return new Date(parsed);
+        const monthYear = text.match(/(\d{1,2})[\/\-.](\d{4})/);
+        if (monthYear) return new Date(Number(monthYear[2]), Number(monthYear[1]) - 1, 1);
+        const year = text.match(/(19|20)\d{2}/);
+        if (year) return new Date(Number(year[0]), 0, 1);
+        return null;
+    };
+
+    let earliest = null;
+    let latest = null;
+    let hasCurrent = false;
+    for (const job of (Array.isArray(workHistory) ? workHistory : [])) {
+        const start = parseFlexibleDate(job?.startDate);
+        if (start && (!earliest || start < earliest)) earliest = start;
+        if (job?.currentlyWorkHere) { hasCurrent = true; continue; }
+        const end = parseFlexibleDate(job?.endDate);
+        if (end && (!latest || end > latest)) latest = end;
+    }
+    if (!earliest) return "";
+    const reference = hasCurrent || !latest ? new Date() : latest;
+    const years = (reference.getTime() - earliest.getTime()) / (365.25 * 24 * 3600 * 1000);
+    if (!Number.isFinite(years) || years <= 0) return "";
+    return String(Math.max(1, Math.round(years)));
+};
+
+// Primary US time zone by state — iCIMS profile pages default the Time Zone
+// select to values like "India Standard Time"; correct it from the profile.
+const ICIMS_STATE_TIMEZONES = {
+    connecticut: 'Eastern', delaware: 'Eastern', florida: 'Eastern', georgia: 'Eastern',
+    maine: 'Eastern', maryland: 'Eastern', massachusetts: 'Eastern', michigan: 'Eastern',
+    'new hampshire': 'Eastern', 'new jersey': 'Eastern', 'new york': 'Eastern',
+    'north carolina': 'Eastern', ohio: 'Eastern', pennsylvania: 'Eastern',
+    'rhode island': 'Eastern', 'south carolina': 'Eastern', vermont: 'Eastern',
+    virginia: 'Eastern', 'west virginia': 'Eastern', indiana: 'Eastern', kentucky: 'Eastern',
+    'district of columbia': 'Eastern',
+    alabama: 'Central', arkansas: 'Central', illinois: 'Central', iowa: 'Central',
+    kansas: 'Central', louisiana: 'Central', minnesota: 'Central', mississippi: 'Central',
+    missouri: 'Central', nebraska: 'Central', 'north dakota': 'Central', oklahoma: 'Central',
+    'south dakota': 'Central', tennessee: 'Central', texas: 'Central', wisconsin: 'Central',
+    arizona: 'Mountain', colorado: 'Mountain', idaho: 'Mountain', montana: 'Mountain',
+    'new mexico': 'Mountain', utah: 'Mountain', wyoming: 'Mountain',
+    california: 'Pacific', nevada: 'Pacific', oregon: 'Pacific', washington: 'Pacific',
+    alaska: 'Alaska', hawaii: 'Hawaii',
+    ct: 'Eastern', de: 'Eastern', fl: 'Eastern', ga: 'Eastern', me: 'Eastern',
+    md: 'Eastern', ma: 'Eastern', mi: 'Eastern', nh: 'Eastern', nj: 'Eastern',
+    ny: 'Eastern', nc: 'Eastern', oh: 'Eastern', pa: 'Eastern', ri: 'Eastern',
+    sc: 'Eastern', vt: 'Eastern', va: 'Eastern', wv: 'Eastern', in: 'Eastern',
+    ky: 'Eastern', dc: 'Eastern',
+    al: 'Central', ar: 'Central', il: 'Central', ia: 'Central', ks: 'Central',
+    la: 'Central', mn: 'Central', ms: 'Central', mo: 'Central', ne: 'Central',
+    nd: 'Central', ok: 'Central', sd: 'Central', tn: 'Central', tx: 'Central',
+    wi: 'Central',
+    az: 'Mountain', co: 'Mountain', id: 'Mountain', mt: 'Mountain', nm: 'Mountain',
+    ut: 'Mountain', wy: 'Mountain',
+    ca: 'Pacific', nv: 'Pacific', or: 'Pacific', wa: 'Pacific',
+    ak: 'Alaska', hi: 'Hawaii'
+};
+
+window.ICIMSEngine.fillTimezoneFromState = (state, country) => {
+    const countryKey = String(country || '').toLowerCase();
+    if (countryKey && !/united states|usa|america/.test(countryKey)) return false;
+    const base = ICIMS_STATE_TIMEZONES[String(state || '').toLowerCase().trim()];
+    if (!base) return false;
+
+    const select = window.ICIMSEngine.findInputByLabelText("Time Zone", "", "select");
+    if (!select || !select.options) return false;
+
+    const wantRe = new RegExp('\\b' + base + '\\b', 'i');
+    const wrongRegion = /australia|europe|africa|asia|south america/i;
+    const currentText = (select.options[select.selectedIndex]?.text || '').trim();
+    if (wantRe.test(currentText) && !wrongRegion.test(currentText)) return false;
+
+    const candidates = Array.from(select.options).filter(o => {
+        return wantRe.test(o.text) && !wrongRegion.test(o.text);
+    });
+    const preferred = candidates.find(o => {
+        return /\b(us|u\.s\.?a?|united states|america|canada)\b/i.test(o.text);
+    }) || candidates[0];
+    if (!preferred) return false;
+
+    window.ICIMSEngine.setNativeValue(select, preferred.value);
+    return true;
 };
 
 // ... (fillRadioGroup remains exactly the same as the previous script)
@@ -162,7 +280,10 @@ window.ICIMSEngine.runAutofill = async (profile) => {
         if (countryFilled) {
             await window.ICIMSEngine.wait(1500); // Increased wait time slightly for the AJAX request to fetch states
         }
-        window.ICIMSEngine.fillSelectDropdown("State/Province", c.state, "Addresses");
+        // Tenants label this either "State/Province" or just "State".
+        if (!window.ICIMSEngine.fillSelectDropdown("State/Province", c.state, "Addresses")) {
+            window.ICIMSEngine.fillSelectDropdown("State", c.state, "Addresses");
+        }
 
         // PAGE 2: Candidate Questions
         // Compute Sponsorship Need based on DB model (handles both current and future)
@@ -179,6 +300,78 @@ window.ICIMSEngine.runAutofill = async (profile) => {
             // Uses the degree from the first entry in their education array
             window.ICIMSEngine.fillSelectDropdown("highest level of education", profile.educationHistory[0].degree);
         }
+
+        const memoryAnswer = key => {
+            const answers = profile.applicationMemory?.answers;
+            if (!Array.isArray(answers)) return "";
+            const entry = answers.find(item => item?.key === key);
+            const answer = entry?.answer;
+            return answer === null || answer === undefined ? "" : String(answer);
+        };
+
+        // --- Job-specific questions ---
+        window.ICIMSEngine.fillSelectDropdown(
+            /authorized to work in the united states/i,
+            e.authorizedToWork || memoryAnswer('authorizedToWorkUSA')
+        );
+
+        // Employer-relationship questions default to "No" — the same derived
+        // rule the AI uses: nothing in the candidate data indicates such a
+        // relationship, employment or title.
+        window.ICIMSEngine.fillSelectDropdown(/currently a .{0,40}\bemployee\b/i, "No");
+        window.ICIMSEngine.fillSelectDropdown(/ever been employed by\b/i, "No");
+        window.ICIMSEngine.fillSelectDropdown(/referred to this position\b/i, "No");
+        window.ICIMSEngine.fillSelectDropdown(/officer or director\b/i, "No");
+        window.ICIMSEngine.fillSelectDropdown(
+            /non.?solicitation|non.?competition|non.?compete/i,
+            memoryAnswer('employmentAgreement')
+        );
+
+        const relocateAnswer = e.willingToRelocate || memoryAnswer('willingToRelocate');
+        window.ICIMSEngine.fillSelectDropdown(
+            /open to relocation|willing to relocate/i,
+            relocateAnswer
+        );
+
+        // "If Yes … If No, please enter N/A" follow-ups, paired with the
+        // No answers above (relocation is Yes, so regions gets a real answer).
+        window.ICIMSEngine.fillTextByLabel(/if yes.*hire date.*n\/?a/i, "N/A");
+        window.ICIMSEngine.fillTextByLabel(/employee'?s name.*n\/?a/i, "N/A");
+        window.ICIMSEngine.fillTextByLabel(/which one\(?s\)?.*n\/?a/i, "N/A");
+        window.ICIMSEngine.fillTextByLabel(/if yes.*provide details.*n\/?a/i, "N/A");
+        if (relocateAnswer) {
+            window.ICIMSEngine.fillTextByLabel(
+                /what regions or states are you open to/i,
+                /^yes/i.test(relocateAnswer) ? "Open to all regions and states" : "N/A"
+            );
+        }
+
+        // Salary expectations from CQFO memory ("$150,000 - $250,000").
+        const salaryFormat = value => {
+            const amount = Number(String(value || '').replace(/[^\d.]/g, ''));
+            return Number.isFinite(amount) && amount > 0
+                ? '$' + amount.toLocaleString('en-US')
+                : '';
+        };
+        const salaryParts = [
+            salaryFormat(memoryAnswer('salaryMinimum')),
+            salaryFormat(memoryAnswer('salaryMaximum'))
+        ].filter(Boolean);
+        if (salaryParts.length) {
+            window.ICIMSEngine.fillTextByLabel(/salary expectation/i, salaryParts.join(' - '));
+        }
+
+        // Experience years from the work-history span.
+        const experienceYears = window.ICIMSEngine.computeExperienceYears(profile.workHistory);
+        if (experienceYears) {
+            window.ICIMSEngine.fillTextByLabel(
+                /exp\.? ?\(years\)|years of experience|experience \(years\)/i,
+                experienceYears
+            );
+        }
+
+        // Preferences: correct the Time Zone default from the profile state.
+        window.ICIMSEngine.fillTimezoneFromState(c.state, c.country);
 
         // PAGE 3+: EEO & Visas 
         window.ICIMSEngine.fillSelectDropdown("Gender", e.gender);

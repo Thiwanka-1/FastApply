@@ -2,7 +2,7 @@
 // Bump this stamp on every build: it prints in the console banner so a stale
 // extension load (Chrome runs the old copy until "Reload" is clicked in
 // chrome://extensions) is immediately visible.
-const FASTAPPLY_BUILD = "2026-08-17.5";
+const FASTAPPLY_BUILD = "2026-08-20.4";
 console.log(`[FastApply] Utils Loaded. (build ${FASTAPPLY_BUILD})`);
 
 const normalizeValue = (value) => String(value ?? "").trim();
@@ -2249,10 +2249,17 @@ const setEngineFieldValue = (element, value) => {
 
   const nativeSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
 
-  if (nativeSetter) {
-    nativeSetter.call(element, target);
-  } else {
-    element.value = target;
+  // Custom/wrapped controls can reject the prototype setter with an
+  // "Illegal invocation" TypeError, which previously escaped and killed the
+  // whole engine pass as an uncaught rejection.
+  try {
+    if (nativeSetter) {
+      nativeSetter.call(element, target);
+    } else {
+      element.value = target;
+    }
+  } catch (_) {
+    try { element.value = target; } catch (_) { return false; }
   }
 
   element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));

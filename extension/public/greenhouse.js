@@ -97,24 +97,27 @@ const fillReactDropdown = async (fieldWrapper, targetValue) => {
     const label = getGreenhouseFieldLabel(fieldWrapper);
     const options = await readGreenhouseOptions(fieldWrapper);
 
-    if (!options.length) {
-      fieldWrapper.dataset.fa_dropdown_tries = String(tries + 1);
-      ghDebug(`dropdown "${label}": no options could be read`);
-      return false;
+    let exactOption = "";
+    if (options.length) {
+      exactOption = resolveGreenhouseOption(targetValue, options, label);
+      if (!exactOption) {
+        fieldWrapper.dataset.fa_dropdown_tries = String(tries + 1);
+        ghDebug(
+          `dropdown "${label}": no option matched "${targetValue}" among ${options.length} options`
+        );
+        return false;
+      }
+    } else {
+      // Search-driven lists (locations) render options only after typing —
+      // pass the raw target through; the filler types it to filter.
+      ghDebug(`dropdown "${label}": options are search-driven, typing "${targetValue}"`);
     }
 
-    const exactOption = resolveGreenhouseOption(targetValue, options, label);
-    if (!exactOption) {
-      fieldWrapper.dataset.fa_dropdown_tries = String(tries + 1);
-      ghDebug(
-        `dropdown "${label}": no option matched "${targetValue}" among ${options.length} options`
-      );
-      return false;
-    }
-
-    const filled = await fillGreenhouseAgentDropdown(fieldWrapper, exactOption, {
-      source: "deterministic"
-    });
+    const filled = await fillGreenhouseAgentDropdown(
+      fieldWrapper,
+      exactOption || cleanGreenhouseText(targetValue),
+      { source: "deterministic" }
+    );
 
     if (!filled) {
       fieldWrapper.dataset.fa_dropdown_tries = String(tries + 1);
@@ -131,6 +134,52 @@ const fillReactDropdown = async (fieldWrapper, targetValue) => {
   } finally {
     delete fieldWrapper.dataset.fa_dropdown_processing;
   }
+};
+
+// Primary US time zone by state — lets "which time zone are you available
+// to work in?" derive deterministically from the profile city/state.
+const US_STATE_TIMEZONES = {
+  connecticut: 'Eastern Time', delaware: 'Eastern Time', florida: 'Eastern Time',
+  georgia: 'Eastern Time', maine: 'Eastern Time', maryland: 'Eastern Time',
+  massachusetts: 'Eastern Time', michigan: 'Eastern Time',
+  'new hampshire': 'Eastern Time', 'new jersey': 'Eastern Time',
+  'new york': 'Eastern Time', 'north carolina': 'Eastern Time',
+  ohio: 'Eastern Time', pennsylvania: 'Eastern Time', 'rhode island': 'Eastern Time',
+  'south carolina': 'Eastern Time', vermont: 'Eastern Time', virginia: 'Eastern Time',
+  'west virginia': 'Eastern Time', indiana: 'Eastern Time', kentucky: 'Eastern Time',
+  'district of columbia': 'Eastern Time',
+  alabama: 'Central Time', arkansas: 'Central Time', illinois: 'Central Time',
+  iowa: 'Central Time', kansas: 'Central Time', louisiana: 'Central Time',
+  minnesota: 'Central Time', mississippi: 'Central Time', missouri: 'Central Time',
+  nebraska: 'Central Time', 'north dakota': 'Central Time', oklahoma: 'Central Time',
+  'south dakota': 'Central Time', tennessee: 'Central Time', texas: 'Central Time',
+  wisconsin: 'Central Time',
+  arizona: 'Mountain Time', colorado: 'Mountain Time', idaho: 'Mountain Time',
+  montana: 'Mountain Time', 'new mexico': 'Mountain Time', utah: 'Mountain Time',
+  wyoming: 'Mountain Time',
+  california: 'Pacific Time', nevada: 'Pacific Time', oregon: 'Pacific Time',
+  washington: 'Pacific Time',
+  alaska: 'Alaska Time', hawaii: 'Hawaii Time',
+  ct: 'Eastern Time', de: 'Eastern Time', fl: 'Eastern Time', ga: 'Eastern Time',
+  me: 'Eastern Time', md: 'Eastern Time', ma: 'Eastern Time', mi: 'Eastern Time',
+  nh: 'Eastern Time', nj: 'Eastern Time', ny: 'Eastern Time', nc: 'Eastern Time',
+  oh: 'Eastern Time', pa: 'Eastern Time', ri: 'Eastern Time', sc: 'Eastern Time',
+  vt: 'Eastern Time', va: 'Eastern Time', wv: 'Eastern Time', in: 'Eastern Time',
+  ky: 'Eastern Time', dc: 'Eastern Time',
+  al: 'Central Time', ar: 'Central Time', il: 'Central Time', ia: 'Central Time',
+  ks: 'Central Time', la: 'Central Time', mn: 'Central Time', ms: 'Central Time',
+  mo: 'Central Time', ne: 'Central Time', nd: 'Central Time', ok: 'Central Time',
+  sd: 'Central Time', tn: 'Central Time', tx: 'Central Time', wi: 'Central Time',
+  az: 'Mountain Time', co: 'Mountain Time', id: 'Mountain Time', mt: 'Mountain Time',
+  nm: 'Mountain Time', ut: 'Mountain Time', wy: 'Mountain Time',
+  ca: 'Pacific Time', nv: 'Pacific Time', or: 'Pacific Time', wa: 'Pacific Time',
+  ak: 'Alaska Time', hi: 'Hawaii Time'
+};
+
+const getUsTimezoneName = (state, country) => {
+  const countryKey = String(country || '').toLowerCase();
+  if (countryKey && !/united states|usa|u\.?s\.?a?\.?$|america/.test(countryKey)) return '';
+  return US_STATE_TIMEZONES[String(state || '').toLowerCase().trim()] || '';
 };
 
 // --- GREENHOUSE CUSTOM FIELD MAPPER ---
@@ -244,6 +293,71 @@ const handleGreenhouseCustoms = async (profile) => {
     }
     else if (questionText.includes('relocat')) {
       await tryDropdown(eeo.willingToRelocate || memoryAnswer('willingToRelocate'));
+    }
+    // Current location — usually a search-driven dropdown; try the fullest
+    // form first, then shorter ones.
+    else if (
+      questionText.includes('current location') ||
+      questionText.includes('where are you located') ||
+      questionText.includes('where do you currently')
+    ) {
+      if (cInfo.city || cInfo.country) {
+        const locationCandidates = [...new Set([
+          [cInfo.city, cInfo.state, cInfo.country].filter(Boolean).join(', '),
+          [cInfo.city, cInfo.state].filter(Boolean).join(', '),
+          [cInfo.city, cInfo.country].filter(Boolean).join(', ')
+        ].filter(Boolean))];
+        for (const candidate of locationCandidates) {
+          if (await tryDropdown(candidate)) break;
+        }
+      }
+    }
+    // English proficiency (CEFR-style lists: "C2 - Proficient").
+    else if (
+      questionText.includes('english') &&
+      /proficien|fluen|level/.test(questionText)
+    ) {
+      const english = (pInfo.languages || []).find(item => {
+        return /english/i.test(item?.language || '');
+      });
+      const proficiency = String(english?.proficiency || '').toLowerCase();
+      const candidates = [];
+      if (english) {
+        if (
+          english.fluent === true ||
+          /native|fluent|proficient|full professional/.test(proficiency)
+        ) {
+          candidates.push('C2 - Proficient', 'Fluent', 'Native or bilingual');
+        } else if (/advanced|professional working/.test(proficiency)) {
+          candidates.push('C1 - Advanced', 'Advanced');
+        } else if (/upper/.test(proficiency)) {
+          candidates.push('B2 - Upper Intermediate', 'Upper Intermediate');
+        } else if (/intermediate|conversational|limited working/.test(proficiency)) {
+          candidates.push('B1 - Intermediate', 'Intermediate');
+        } else if (/element|basic|beginner/.test(proficiency)) {
+          candidates.push('A2 - Elementary', 'Beginner');
+        } else if (english.proficiency) {
+          candidates.push(english.proficiency);
+        }
+      }
+      for (const candidate of candidates.slice(0, 3)) {
+        if (await tryDropdown(candidate)) break;
+      }
+    }
+    // U.S. time zone — derived from the profile state ("Texas" → Central).
+    else if (/time ?zones?\b/.test(questionText)) {
+      const timezone = getUsTimezoneName(cInfo.state, cInfo.country);
+      if (timezone) {
+        const boxes = Array.from(field.querySelectorAll('input[type="checkbox"]'));
+        if (boxes.length) {
+          if (window.FastApplyUtils.fillCheckbox(boxes, timezone)) {
+            ghDebug(`time zone "${questionText.slice(0, 50)}" → "${timezone}"`);
+            filledAnything = true;
+          }
+        } else if (await tryDropdown(timezone)) {
+          ghDebug(`time zone "${questionText.slice(0, 50)}" → "${timezone}"`);
+        }
+      }
     }
 
     // --- Demographic EEO ---
@@ -1306,16 +1420,51 @@ const fillGreenhouseAgentDropdown =
         openedControl
       );
 
-    const matchedOption =
+    let matchedOption =
       await findVirtualizedGreenhouseOption(
         listbox,
         target
       );
 
+    // Search-driven lists (locations, long country lists) render options
+    // only after typing — filter with the target text and retry.
+    if (!matchedOption && openedControl.input) {
+      try {
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          "value"
+        )?.set;
+        if (setter) setter.call(openedControl.input, target);
+        else openedControl.input.value = target;
+        openedControl.input.dispatchEvent(new Event("input", { bubbles: true }));
+      } catch (_) {}
+      await waitForGreenhouse(650);
+
+      const searchListbox = getGreenhouseListbox(openedControl);
+      matchedOption = await findVirtualizedGreenhouseOption(
+        searchListbox,
+        target
+      );
+
+      if (!matchedOption) {
+        const rendered = getGreenhouseOptionElements(searchListbox);
+        matchedOption = window.FastApplyUtils.findBestSemanticMatch?.(
+          rendered,
+          target,
+          element => cleanGreenhouseText(element.innerText || element.textContent)
+        ) || (rendered.length === 1 ? rendered[0] : null);
+      }
+    }
+
     if (!matchedOption) {
       closeGreenhouseDropdown();
       return false;
     }
+
+    // Captured before the click — selected options can unmount immediately.
+    const chosenText = cleanGreenhouseText(
+      matchedOption.innerText || matchedOption.textContent
+    ) || target;
 
     matchedOption.scrollIntoView?.({ block: "nearest", inline: "nearest" });
     if (typeof PointerEvent === "function") {
@@ -1356,20 +1505,42 @@ const fillGreenhouseAgentDropdown =
 
     await waitForGreenhouse(180);
 
-    const currentValue =
-      getGreenhouseCurrentValue(
-        wrapper
-      );
-    const stillExpanded =
+    const isExpanded = () =>
       control.input?.getAttribute("aria-expanded") === "true" ||
       control.trigger?.getAttribute("aria-expanded") === "true";
 
+    // Some tenants leave the menu open after a successful pick — close it
+    // before judging instead of calling the fill a failure.
+    if (isExpanded()) {
+      closeGreenhouseDropdown();
+      await waitForGreenhouse(150);
+    }
+
+    // The displayed value can be a shorter or longer form of the clicked
+    // option ("United States" vs "United States of America") — exact-only
+    // comparison rolled those back as "did not verify".
+    const valueMatches = (liveValue, expected) => {
+      const live = normalizeGreenhouseText(liveValue);
+      const wanted = normalizeGreenhouseText(expected);
+      if (!live || !wanted) return false;
+      if (live === wanted) return true;
+      const shorter = live.length < wanted.length ? live : wanted;
+      if (
+        (shorter.split(" ").length >= 2 || shorter.length >= 6) &&
+        (live.includes(wanted) || wanted.includes(live))
+      ) return true;
+      return window.FastApplyUtils.smartMatch?.(liveValue, expected) === true;
+    };
+
     const verified = settings.multiple === true
       ? getGreenhouseSelectedValues(wrapper).some(value => {
-          return normalizeGreenhouseText(value) === normalizeGreenhouseText(target);
+          return valueMatches(value, chosenText) || valueMatches(value, target);
         })
-      : !stillExpanded &&
-        normalizeGreenhouseText(currentValue) === normalizeGreenhouseText(target);
+      : !isExpanded() && (() => {
+          const currentValue = getGreenhouseCurrentValue(wrapper);
+          return valueMatches(currentValue, chosenText) ||
+            valueMatches(currentValue, target);
+        })();
 
     if (!verified) return false;
 

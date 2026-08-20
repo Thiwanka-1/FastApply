@@ -667,6 +667,20 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     const strippedMatches = usable.filter(option => strippedKey(option) === target);
     if (strippedMatches.length) return strippedMatches[0];
 
+    // The TARGET can carry parenthetical baggage of its own — the stored
+    // CQFO wording "I am not a veteran. (I have not served in the military)"
+    // IS the option "I am not a veteran".
+    const strippedTarget = W.normalizeText(
+      String(targetValue ?? "").replace(/\s*\([^)]*\)/g, " ")
+    );
+    if (strippedTarget && strippedTarget !== target) {
+      const targetStrippedMatch = usable.find(option => {
+        return optionKey(option) === strippedTarget ||
+          strippedKey(option) === strippedTarget;
+      });
+      if (targetStrippedMatch) return targetStrippedMatch;
+    }
+
     const wholeValueMatches = usable.filter(option => {
       const optionText = optionKey(option);
       return optionText.startsWith(`${target} `) || optionText.endsWith(` ${target}`);

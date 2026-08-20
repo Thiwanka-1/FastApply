@@ -494,6 +494,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
           const storedAnswer = getStoredAnswer(profile, question);
           const conditionalDetail = getConditionalDetailAnswer(profile, label, question);
           let target;
+          let fallbackTarget;
 
           if (question.includes("authorized to work")) {
             target = hasValue(storedAnswer) ? storedAnswer : eeo.authorizedToWork;
@@ -518,8 +519,25 @@ window.WorkdayEngine = window.WorkdayEngine || {};
             question.includes("hispanic")
           ) {
             target = optOut ? "prefer not" : (eeo.ethnicity || eeo.race);
+            // Tenant "Ethnicity" lists are often race+ethnicity combos
+            // ("Asian, not Hispanic or Latino (United States of America)")
+            // where a pure ethnicity value appears in EVERY row and matches
+            // nothing uniquely — the race value resolves those lists.
+            if (!optOut && eeo.race && eeo.race !== target) {
+              fallbackTarget = eeo.race;
+            }
           } else if (question.includes("veteran")) {
-            target = optOut ? "prefer not" : eeo.veteran;
+            // Prefer the exact CQFO wording: extended tenant lists carry two
+            // different "not protected" rows ("…just not a protected
+            // veteran" vs "I am not a veteran") that the normalized value
+            // cannot tell apart.
+            const originalVeteran = optOut
+              ? ""
+              : findStoredAnswerByKey(profile, "veteranStatusOriginal");
+            target = optOut ? "prefer not" : (originalVeteran || eeo.veteran);
+            if (!optOut && originalVeteran && eeo.veteran && originalVeteran !== eeo.veteran) {
+              fallbackTarget = eeo.veteran;
+            }
           } else if (question.includes("disability")) {
             // Same opt-out phrasing as the other demographics; the semantic
             // matcher classifies "prefer not" to the opt-out option whatever
@@ -546,7 +564,18 @@ window.WorkdayEngine = window.WorkdayEngine || {};
           }
 
           if (hasValue(target)) {
-            const knownAnswerFilled = await fillChoice(container, target);
+            let knownAnswerFilled = await fillChoice(container, target);
+            if (!knownAnswerFilled && hasValue(fallbackTarget)) {
+              knownAnswerFilled = await fillChoice(container, fallbackTarget);
+              if (knownAnswerFilled) {
+                W.debug?.(
+                  "filled via fallback target:",
+                  question.slice(0, 50),
+                  "→",
+                  choiceValue(fallbackTarget)
+                );
+              }
+            }
             filledThisWave = knownAnswerFilled || filledThisWave;
             filledAnything = knownAnswerFilled || filledAnything;
             if (!knownAnswerFilled) {
@@ -554,7 +583,8 @@ window.WorkdayEngine = window.WorkdayEngine || {};
                 "question not filled:",
                 question.slice(0, 70),
                 "→ target:",
-                choiceValue(target)
+                choiceValue(target),
+                hasValue(fallbackTarget) ? `(fallback: ${choiceValue(fallbackTarget)})` : ""
               );
             }
             if (knownAnswerFilled) continue;
