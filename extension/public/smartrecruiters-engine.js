@@ -296,130 +296,349 @@ window.SREngine.fillProfiles = async (profile) => {
     }
 };
 
-// Clicks the "+ Add" button for specific sections across Shadow Boundaries
-window.SREngine.clickSectionAddButton = (sectionKeyword) => {
-    const roots = window.SREngine.getAllRoots();
-    for (const root of roots) {
-        const headings = Array.from(root.querySelectorAll('h1, h2, h3, h4, h5, p, legend'));
-        const heading = headings.find(h => (h.innerText || h.textContent || "").toLowerCase().includes(sectionKeyword));
+// --- SECTION (Experience / Education) HANDLING ---
+// Workday-style: cards are added one per pass, every lookup is SCOPED to
+// the card being filled (page-global lookups cross-contaminated fields and
+// ticked the wrong "I currently work here" checkbox when several cards were
+// open), and missing entries are counted by occurrences so duplicate job
+// titles ("Program Officer" ×3) are each added.
 
-        if (heading) {
-            let container = heading.parentElement;
-            for (let i = 0; i < 6; i++) { // Walk up the DOM tree looking for the Add button
-                if (!container) break;
-                const btns = Array.from(container.querySelectorAll('button'));
-                const addBtn = btns.find(b => (b.innerText || b.textContent || "").toLowerCase().includes("add") && !b.dataset.fa_clicked);
+const srTextOf = el =>
+    (el?.innerText || el?.textContent || "").replace(/\*/g, '').trim().toLowerCase();
 
-                if (addBtn) {
-                    addBtn.dataset.fa_clicked = "true";
-                    addBtn.click();
-                    return true;
-                }
-                // Jump the Shadow DOM boundary if the container is an isolated component
-                container = container.parentElement || (container.getRootNode() && container.getRootNode().host);
-            }
-        }
+// Sections are detected GEOMETRICALLY: the SmartRecruiters UI renders
+// inside shadow roots, where plain document queries find no headings and
+// document-order comparisons break across shadow boundaries. Headings are
+// located through the shadow walker, and an element belongs to a section
+// when its Y position sits between that section's heading and the next.
+const SR_SECTION_TITLES = [
+    'personal information', 'experience', 'education', 'your profiles',
+    'resume', 'certifications', 'languages', 'skills',
+    'message to the hiring team', 'additional information',
+    'screening questions'
+];
+
+const srRect = el => {
+    try { return el.getBoundingClientRect(); } catch (_) { return null; }
+};
+const srVisible = el => {
+    const rect = srRect(el);
+    return Boolean(rect && rect.width > 0 && rect.height > 0);
+};
+
+const findSectionHeadings = () => {
+    const candidates = window.SREngine.deepQueryAll('h1, h2, h3, h4, h5, legend, p, span, div')
+        .filter(el => {
+            if (!srVisible(el)) return false;
+            const text = srTextOf(el);
+            if (!text || text.length > 45) return false;
+            return SR_SECTION_TITLES.some(title => text === title || text.startsWith(title));
+        });
+    // Leaf-most element per heading: drop wrappers that contain another
+    // candidate with the same role.
+    const leaves = candidates.filter(el => {
+        return !candidates.some(other => other !== el && el.contains(other));
+    });
+    return leaves.map(el => ({
+        el,
+        top: srRect(el).top,
+        text: srTextOf(el)
+    }));
+};
+
+const getSectionBounds = (keyword) => {
+    const headings = findSectionHeadings();
+    const own = headings
+        .filter(h => h.text.startsWith(keyword))
+        .sort((a, b) => a.top - b.top)[0];
+    if (!own) {
+        console.debug(
+            '[FastApply:smartrecruiters] sections detected:',
+            headings.map(h => `${h.text}@${Math.round(h.top)}`).join(', ') || '(none)'
+        );
+        return null;
+    }
+    const lowerTops = headings
+        .filter(h => h.top > own.top + 1 && !h.text.startsWith(keyword))
+        .map(h => h.top);
+    return {
+        heading: own.el,
+        top: own.top,
+        bottom: lowerTops.length ? Math.min(...lowerTops) : Infinity
+    };
+};
+
+const isInSection = (element, bounds) => {
+    if (!element || !bounds || !srVisible(element)) return false;
+    const rect = srRect(element);
+    return rect.top > bounds.top + 1 && rect.top < bounds.bottom;
+};
+
+// Saved (collapsed) cards render their key as leaf text nodes.
+const countSavedEntries = (bounds, key) => {
+    if (!key) return 0;
+    return window.SREngine.deepQueryAll('h1, h2, h3, h4, h5, strong, b, p, span, div')
+        .filter(el => {
+            return el.children.length === 0 &&
+                isInSection(el, bounds) &&
+                srTextOf(el) === key;
+        }).length;
+};
+
+// Label → control lookup, scoped to a card/section.
+window.SREngine.getLabeledInput = (scope, labelText) => {
+    if (!scope) return null;
+    const wanted = labelText.toLowerCase();
+    const labels = Array.from(scope.querySelectorAll('label, .c-spl-form-field-label'));
+    const label = labels.find(l => srTextOf(l) === wanted) ||
+        labels.find(l => {
+            const t = srTextOf(l);
+            return t.includes(wanted) && t.length <= Math.max(40, wanted.length * 4);
+        });
+    if (!label) return null;
+    const forAttr = label.getAttribute('for') || label.htmlFor;
+    if (forAttr) {
+        const root = label.getRootNode?.() || document;
+        const byId = root.querySelector?.(`[id="${forAttr}"]`);
+        if (byId) return byId;
+    }
+    const wrapper = label.closest('div') || scope;
+    return wrapper.querySelector(
+        'input:not([type="hidden"]):not([type="checkbox"]), textarea, [contenteditable="true"]'
+    );
+};
+
+// Smallest ancestor holding exactly ONE anchor label and no section
+// heading — the entry card.
+window.SREngine.getCardRoot = (anchorInput, anchorLabel) => {
+    const countAnchors = scope => {
+        return Array.from(scope.querySelectorAll('label, .c-spl-form-field-label'))
+            .filter(l => srTextOf(l) === anchorLabel).length;
+    };
+    let node = anchorInput.parentElement;
+    let best = anchorInput.parentElement;
+    while (node && node !== document.body) {
+        if (countAnchors(node) > 1) break;
+        if (node.querySelector('h1, h2, h3, h4, h5, legend')) break;
+        best = node;
+        node = node.parentElement;
+    }
+    return best;
+};
+
+// Description boxes are framework-controlled (plain value writes were
+// reverted AFTER our verification, leaving them empty) and can be
+// contenteditable — type through the native editing pipeline.
+window.SREngine.fillSrRichText = async (element, value) => {
+    if (!element || !value) return false;
+    const readValue = () => element.isContentEditable
+        ? (element.innerText || '').trim()
+        : String(element.value || '').trim();
+    if (readValue()) return true;
+
+    try {
+        element.focus();
+        if (element.isContentEditable) document.execCommand('selectAll', false, null);
+        else element.select?.();
+        document.execCommand('insertText', false, value);
+    } catch (_) {}
+
+    if (!readValue() && !element.isContentEditable) {
+        window.SREngine.setNativeValue(element, value);
+    }
+    element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    element.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+    await window.SREngine.wait(150);
+
+    if (readValue()) {
+        element.dataset.fa_filled = 'true';
+        window.FastApplyUtils.setValueOwner?.(element, 'deterministic');
+        return true;
     }
     return false;
 };
 
-// Safe sequential loops for repeating arrays
-window.SREngine.handleExperience = async (workHistory) => {
-    if (!workHistory || workHistory.length === 0) return;
-    if (window.SREngine.isAddingExp) return;
-    window.SREngine.isAddingExp = true;
+const fillSmartRecruitersSection = async (sectionKeyword, entries, config) => {
+    const validEntries = (Array.isArray(entries) ? entries : [])
+        .filter(entry => (config.entryKey(entry) || '').trim());
+    if (!validEntries.length) return false;
+
+    const flag = `isFilling_${sectionKeyword}`;
+    if (window.SREngine[flag]) return false;
+    window.SREngine[flag] = true;
 
     try {
-        const existingTitles = window.SREngine.deepQueryAll('h4, p, span').map(el => (el.innerText || "").toLowerCase());
-
-        for (const work of workHistory) {
-            if (!work.jobTitle) continue;
-            if (existingTitles.some(t => t.includes(work.jobTitle.toLowerCase()))) continue; // Skip if already visually on page
-
-            const clicked = window.SREngine.clickSectionAddButton("experience");
-            if (clicked) await window.SREngine.wait(1200); // Wait for modal to slide down
-
-            window.SREngine.setNativeValue(window.SREngine.findInputByLabelText("Title"), work.jobTitle);
-            await window.SREngine.wait(200);
-            window.SREngine.setNativeValue(window.SREngine.findInputByLabelText("Company"), work.company);
-            window.SREngine.setNativeValue(window.SREngine.findInputByLabelText("location"), work.location);
-            window.SREngine.setNativeValue(window.SREngine.findInputByLabelText("Description"), work.description);
-            await window.SREngine.fillSrDate(window.SREngine.findInputByLabelText("From"), work.startDate);
-
-            if (work.currentlyWorkHere) {
-                const cbs = window.SREngine.deepQueryAll('input[type="checkbox"]');
-                const currentCb = cbs[cbs.length - 1]; // Grabs the most recently rendered checkbox
-                if (currentCb && !currentCb.checked) currentCb.click();
-            } else {
-                await window.SREngine.fillSrDate(window.SREngine.findInputByLabelText("To"), work.endDate);
-            }
-
-            await window.SREngine.wait(500);
-
-            const btns = window.SREngine.deepQueryAll('button');
-            const saveBtn = btns.find(b => (b.innerText || "").toLowerCase().trim() === "save");
-            if (saveBtn) {
-                saveBtn.click();
-                await window.SREngine.wait(1500); // Wait for modal to close into a card
-            }
-            break; // Stop loop and let the orchestrator run it again so DOM stays fresh
+        const bounds = getSectionBounds(sectionKeyword);
+        if (!bounds) {
+            console.debug(`[FastApply:smartrecruiters] section "${sectionKeyword}": heading not found`);
+            return false;
         }
+
+        const anchorLabels = window.SREngine.deepQueryAll('label, .c-spl-form-field-label')
+            .filter(l => srTextOf(l) === config.anchorLabel && isInSection(l, bounds));
+        const anchorInputs = anchorLabels.map(label => {
+            const forAttr = label.getAttribute('for') || label.htmlFor;
+            const root = label.getRootNode?.() || document;
+            return (forAttr && root.querySelector?.(`[id="${forAttr}"]`)) ||
+                (label.closest('div') || document)
+                    .querySelector('input:not([type="hidden"])');
+        }).filter(Boolean);
+
+        // Occurrence-counted presence (saved cards + open card values) so
+        // duplicate titles all get their own card.
+        const openValues = anchorInputs
+            .map(input => String(input.value || '').trim().toLowerCase())
+            .filter(Boolean);
+        const presentByKey = new Map();
+        const missingEntries = [];
+        for (const entry of validEntries) {
+            const key = (config.entryKey(entry) || '').trim().toLowerCase();
+            if (!presentByKey.has(key)) {
+                presentByKey.set(
+                    key,
+                    countSavedEntries(bounds, key) +
+                    openValues.filter(value => value === key).length
+                );
+            }
+            const present = presentByKey.get(key);
+            if (present > 0) presentByKey.set(key, present - 1);
+            else missingEntries.push(entry);
+        }
+
+        const emptyAnchor = anchorInputs.find(input => {
+            return !String(input.value || '').trim();
+        });
+
+        if (emptyAnchor && missingEntries.length) {
+            const card = window.SREngine.getCardRoot(
+                emptyAnchor,
+                config.anchorLabel
+            );
+            await config.fillCard(card, missingEntries[0]);
+            console.debug(
+                `[FastApply:smartrecruiters] ${sectionKeyword} card filled:`,
+                config.entryKey(missingEntries[0])
+            );
+
+            // Save the card so it collapses and the next pass adds the next
+            // entry. If SmartRecruiters rejects it (validation), the card
+            // stays open with its values for the user to finish.
+            await window.SREngine.wait(400);
+            const saveButton = Array.from(card.querySelectorAll('button'))
+                .find(button => (button.innerText || '').trim().toLowerCase() === 'save');
+            if (saveButton) {
+                saveButton.click();
+                await window.SREngine.wait(1000);
+            }
+            return true;
+        }
+
+        if (!emptyAnchor && missingEntries.length) {
+            // The Add button sits in the section's header ROW — its Y is at
+            // (or slightly above) the heading itself, so allow a margin.
+            const addButton = window.SREngine.deepQueryAll('button')
+                .filter(button => {
+                    return srVisible(button) &&
+                        /(^|\s)add(\s|$)/i.test((button.innerText || '').trim());
+                })
+                .find(button => {
+                    const rect = srRect(button);
+                    return rect && rect.top > bounds.top - 60 && rect.top < bounds.bottom;
+                });
+            if (!addButton) {
+                console.debug(
+                    `[FastApply:smartrecruiters] section "${sectionKeyword}": Add button not found`
+                );
+                return false;
+            }
+            addButton.click();
+            console.debug(
+                `[FastApply:smartrecruiters] ${sectionKeyword}: added card for`,
+                config.entryKey(missingEntries[0])
+            );
+            await window.SREngine.wait(1200);
+            return true; // the next pass fills the new card
+        }
+
+        return false;
     } finally {
-        window.SREngine.isAddingExp = false;
+        window.SREngine[flag] = false;
     }
 };
 
-window.SREngine.handleEducation = async (eduHistory) => {
-    if (!eduHistory || eduHistory.length === 0) return;
-    if (window.SREngine.isAddingEdu) return;
-    window.SREngine.isAddingEdu = true;
+window.SREngine.handleExperience = async (workHistory) => {
+    return fillSmartRecruitersSection('experience', workHistory, {
+        anchorLabel: 'title',
+        entryKey: work => work?.jobTitle || '',
+        fillCard: async (card, work) => {
+            await window.SREngine.commitAutocomplete(
+                window.SREngine.getLabeledInput(card, 'Title'), work.jobTitle
+            );
+            await window.SREngine.commitAutocomplete(
+                window.SREngine.getLabeledInput(card, 'Company'), work.company
+            );
+            await window.SREngine.commitAutocomplete(
+                window.SREngine.getLabeledInput(card, 'Office location'), work.location
+            );
+            await window.SREngine.fillSrRichText(
+                window.SREngine.getLabeledInput(card, 'Description'), work.description
+            );
+            await window.SREngine.fillSrDate(
+                window.SREngine.getLabeledInput(card, 'From'), work.startDate
+            );
 
-    try {
-        const existingSchools = window.SREngine.deepQueryAll('h4, p, span').map(el => (el.innerText || "").toLowerCase());
-
-        for (const edu of eduHistory) {
-            if (!edu.school) continue;
-            if (existingSchools.some(s => s.includes(edu.school.toLowerCase()))) continue;
-
-            const clicked = window.SREngine.clickSectionAddButton("education");
-            if (clicked) await window.SREngine.wait(1200);
-
-            // Institution is a suggestion-committed autocomplete like City.
-            const institutionInput = window.SREngine.findInputByLabelText("Institution");
-            if (!(await window.SREngine.commitAutocomplete(institutionInput, edu.school))) {
-                window.SREngine.setNativeValue(institutionInput, edu.school);
+            // "Present"/"Current" is NOT a date — it means the current-role
+            // checkbox (SmartRecruiters throws "Invalid date provided:
+            // Present" otherwise).
+            const isPresent = /present|current/i.test(String(work.endDate || ''));
+            if (work.currentlyWorkHere || isPresent) {
+                const currentCheckbox = card.querySelector('input[type="checkbox"]');
+                if (currentCheckbox && !currentCheckbox.checked) currentCheckbox.click();
+            } else if (work.endDate) {
+                await window.SREngine.fillSrDate(
+                    window.SREngine.getLabeledInput(card, 'To'), work.endDate
+                );
             }
-            await window.SREngine.wait(200);
-            window.SREngine.setNativeValue(window.SREngine.findInputByLabelText("Major"), edu.major);
-            window.SREngine.setNativeValue(window.SREngine.findInputByLabelText("Degree"), edu.degree);
-            const schoolLocationInput = window.SREngine.findInputByLabelText("School location");
-            if (schoolLocationInput && edu.institutionLocation) {
-                await window.SREngine.commitAutocomplete(schoolLocationInput, edu.institutionLocation);
-            }
-            window.SREngine.setNativeValue(window.SREngine.findInputByLabelText("Description"), edu.description || "");
-            await window.SREngine.fillSrDate(window.SREngine.findInputByLabelText("From"), edu.startDate);
-
-            if (edu.currentlyAttending) {
-                const cbs = window.SREngine.deepQueryAll('input[type="checkbox"]');
-                const currentCb = cbs[cbs.length - 1];
-                if (currentCb && !currentCb.checked) currentCb.click();
-            } else {
-                await window.SREngine.fillSrDate(window.SREngine.findInputByLabelText("To"), edu.endDate);
-            }
-
-            await window.SREngine.wait(500);
-
-            const btns = window.SREngine.deepQueryAll('button');
-            const saveBtn = btns.find(b => (b.innerText || "").toLowerCase().trim() === "save");
-            if (saveBtn) {
-                saveBtn.click();
-                await window.SREngine.wait(1500);
-            }
-            break;
+            return true;
         }
-    } finally {
-        window.SREngine.isAddingEdu = false;
-    }
+    });
+};
+
+window.SREngine.handleEducation = async (eduHistory) => {
+    return fillSmartRecruitersSection('education', eduHistory, {
+        anchorLabel: 'institution',
+        entryKey: edu => edu?.school || '',
+        fillCard: async (card, edu) => {
+            await window.SREngine.commitAutocomplete(
+                window.SREngine.getLabeledInput(card, 'Institution'), edu.school
+            );
+            await window.SREngine.fillSrRichText(
+                window.SREngine.getLabeledInput(card, 'Major'), edu.major
+            );
+            await window.SREngine.fillSrRichText(
+                window.SREngine.getLabeledInput(card, 'Degree'), edu.degree
+            );
+            if (edu.institutionLocation) {
+                await window.SREngine.commitAutocomplete(
+                    window.SREngine.getLabeledInput(card, 'School location'),
+                    edu.institutionLocation
+                );
+            }
+            await window.SREngine.fillSrDate(
+                window.SREngine.getLabeledInput(card, 'From'), edu.startDate
+            );
+            if (edu.endDate && !/present|current/i.test(String(edu.endDate))) {
+                await window.SREngine.fillSrDate(
+                    window.SREngine.getLabeledInput(card, 'To'), edu.endDate
+                );
+            } else if (edu.endDate) {
+                const currentCheckbox = card.querySelector('input[type="checkbox"]');
+                if (currentCheckbox && !currentCheckbox.checked) currentCheckbox.click();
+            }
+            return true;
+        }
+    });
 };
 
 // --- ORCHESTRATOR LOOP ---
@@ -457,15 +676,20 @@ const startSREngine = () => {
 };
 
 const runSmartRecruitersDeterministic = async profile => {
-    try {
-        await window.SREngine.fillPersonalInfo(profile);
-        await window.SREngine.fillProfiles(profile);
+    // Every stage runs in its own guard: a crash in one (e.g. the City
+    // autocomplete) must never stop the Experience/Education automation.
+    const safeStage = async (name, stage) => {
+        try {
+            await stage();
+        } catch (error) {
+            console.warn(`[FastApply] SmartRecruiters ${name} stage failed:`, error);
+        }
+    };
 
-        await window.SREngine.handleExperience(profile.workHistory);
-        await window.SREngine.handleEducation(profile.educationHistory);
-    } catch (error) {
-        console.warn("[FastApply] SmartRecruiters pass failed:", error);
-    }
+    await safeStage('personal', () => window.SREngine.fillPersonalInfo(profile));
+    await safeStage('profiles', () => window.SREngine.fillProfiles(profile));
+    await safeStage('experience', () => window.SREngine.handleExperience(profile.workHistory));
+    await safeStage('education', () => window.SREngine.handleEducation(profile.educationHistory));
 };
 
 window.FastApplyAgent2Controller?.register({

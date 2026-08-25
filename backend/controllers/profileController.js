@@ -279,6 +279,12 @@ const cleanApplicationMemory = (memory) => {
 
       if (!hasAnswer) return false;
 
+      // A trailing colon marks a captured document SECTION HEADING
+      // ("Professional Information:"), never a real answer.
+      if (typeof item.answer === 'string' && /:\s*$/.test(item.answer.trim())) {
+        return false;
+      }
+
       usedKeys.add(item.key);
       return true;
     });
@@ -564,6 +570,22 @@ const normalizeVeteranStatus = (value) => {
     return { value: '', optOut: false };
   }
 
+  // Opt-out phrasing MUST be recognized before the yes/no branches:
+  // "I do not wish to answer whether I am a protected veteran" contains
+  // "protected veteran" and was previously stored as a positive claim.
+  if (
+    text.includes('do not wish') ||
+    text.includes("don t wish") ||
+    text.includes("don't wish") ||
+    text.includes('prefer not') ||
+    text.includes('decline')
+  ) {
+    return {
+      value: '',
+      optOut: true
+    };
+  }
+
   if (
     text === 'no' ||
     text.includes('not a veteran') ||
@@ -584,17 +606,6 @@ const normalizeVeteranStatus = (value) => {
     return {
       value: 'I am a protected veteran',
       optOut: false
-    };
-  }
-
-  if (
-    text.includes('do not wish') ||
-    text.includes('prefer not') ||
-    text.includes('decline')
-  ) {
-    return {
-      value: '',
-      optOut: true
     };
   }
 
@@ -638,20 +649,24 @@ const correctEmploymentTypes = (history) => {
   if (!Array.isArray(history)) return [];
 
   return history.map(item => {
+    // Company + title only: descriptions routinely mention "consulting
+    // engagements" for agency employees, and firm names like "CHA
+    // Consulting, Inc." or titles like "Product Owner" must never rewrite a
+    // regular job into Self-employed.
     const roleText = [
       item.company,
-      item.jobTitle,
-      item.description
+      item.jobTitle
     ].join(' ').toLowerCase();
 
     const isIndependentWork =
       /\bindependent\b/.test(roleText) ||
       /\bself[- ]employed\b/.test(roleText) ||
-      /\bfreelance\b/.test(roleText) ||
-      /\bconsulting\b/.test(roleText) ||
-      /\bconsultant\b/.test(roleText) ||
+      /\bfreelanc(e|er|ing)\b/.test(roleText) ||
+      /\bindependent consultant\b/.test(roleText) ||
       /\bfounder\b/.test(roleText) ||
-      /\bowner\b/.test(roleText);
+      /\bsole proprietor\b/.test(roleText) ||
+      (/\bowner\b/.test(roleText) &&
+        !/\b(product|process|project|business|service) owner\b/.test(roleText));
 
     if (isIndependentWork) {
       return {
@@ -918,13 +933,20 @@ const postProcessExtractedProfile = (profileData, documents) => {
 const MEMORY_KEY_MAP = {
   telephoneAvailability: 'telephoneAccessible24Hours',
   discontinueIfDobMandated: 'stopApplicationIfDobRequired',
+  discontinueApplicationIfDOBMandated: 'stopApplicationIfDobRequired',
   relocationStatus: 'willingToRelocate',
+  relocationWillingness: 'willingToRelocate',
+  relocation: 'willingToRelocate',
   workTimeAvailability: 'eveningsWeekendsAvailable',
   citizenshipStatus: 'otherCitizenshipOrResidency',
+  otherCountryCitizenship: 'otherCitizenshipOrResidency',
   citizenshipDetails: 'canadaWorkAuthorizationDetails',
   salaryNotes: 'salaryNegotiationNotes',
   governmentEmploymentUSA: 'governmentEmployment',
-  employmentAgreements: 'employmentAgreement'
+  governmentEmploymentLastThreeYears: 'governmentEmployment',
+  employmentAgreements: 'employmentAgreement',
+  criminalConvictionHistory: 'criminalHistory',
+  interviewAvailabilityDates: 'interviewAvailability'
 };
 
 const DEGREE_REFINEMENTS = [
@@ -994,9 +1016,16 @@ const refineEducationHistory = (history, documents) => {
   return history.map(item => {
     let degree = cleanText(item.degree);
 
-    if (/^(bachelor|master|associate|doctor)(?:'s)? degree$/i.test(degree)) {
+    const levelMatch = degree.match(/^(bachelor|master|associate|doctor)(?:'s)? degree$/i);
+    if (levelMatch) {
+      const level = levelMatch[1].toLowerCase();
+
+      // Only a specific degree of the SAME level may replace the generic
+      // name. Unfiltered, "Master's Degree" became "Bachelor of Science"
+      // whenever the resume mentioned the bachelor's anywhere.
       const refinement = DEGREE_REFINEMENTS.find(entry => {
-        return entry.pattern.test(documentText);
+        return entry.value.toLowerCase().startsWith(level) &&
+          entry.pattern.test(documentText);
       });
 
       if (refinement) degree = refinement.value;

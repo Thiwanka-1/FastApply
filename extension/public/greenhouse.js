@@ -1711,7 +1711,7 @@ const collectGreenhouseAgentFields =
         validity: {
           valid:
             ownerControl.getAttribute?.("aria-invalid") !== "true" &&
-            (typeof ownerControl.checkValidity !== "function" || ownerControl.checkValidity()),
+            window.FastApplyUtils.safeCheckValidity(ownerControl),
           ariaInvalid: ownerControl.getAttribute?.("aria-invalid") === "true",
           message: cleanGreenhouseText(ownerControl.validationMessage || "")
         }
@@ -1908,8 +1908,7 @@ const applyGreenhouseAgentAnswers =
         )
       ) {
         const isValid = customField.ownerControl.getAttribute?.("aria-invalid") !== "true" &&
-          (typeof customField.ownerControl.checkValidity !== "function" ||
-            customField.ownerControl.checkValidity());
+          window.FastApplyUtils.safeCheckValidity(customField.ownerControl);
 
         if (
           customField.valueOwner === "user" &&
