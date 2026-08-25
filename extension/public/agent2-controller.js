@@ -711,7 +711,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         validity: {
           valid:
             control.getAttribute("aria-invalid") !== "true" &&
-            (typeof control.checkValidity !== "function" || control.checkValidity()),
+            U.safeCheckValidity(control),
           ariaInvalid: control.getAttribute("aria-invalid") === "true",
           message: cleanText(control.validationMessage || "")
         }
@@ -1086,7 +1086,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       }
 
       const isValid = field.control.getAttribute("aria-invalid") !== "true" &&
-        (typeof field.control.checkValidity !== "function" || field.control.checkValidity());
+        U.safeCheckValidity(field.control);
       if (field.valueOwner === "user" && hasFieldValue(liveValue) && isValid) {
         answer.action = "keep";
         answer.value = liveValue;

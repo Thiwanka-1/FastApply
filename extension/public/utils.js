@@ -2,7 +2,7 @@
 // Bump this stamp on every build: it prints in the console banner so a stale
 // extension load (Chrome runs the old copy until "Reload" is clicked in
 // chrome://extensions) is immediately visible.
-const FASTAPPLY_BUILD = "2026-08-20.4";
+const FASTAPPLY_BUILD = "2026-08-25.3";
 console.log(`[FastApply] Utils Loaded. (build ${FASTAPPLY_BUILD})`);
 
 const normalizeValue = (value) => String(value ?? "").trim();
@@ -718,6 +718,23 @@ const getLabelText = (input) => {
     }
   }
 
+  if (!text && input.closest) {
+    // Lever-style question cards: the question text lives in a dedicated
+    // label node beside the control. Checked BEFORE the placeholder — the
+    // placeholder ("Type your response") or the raw field name
+    // ("cards[…][field0]") otherwise became the "label" and neither the
+    // engines nor the LLM could tell what was being asked.
+    const questionRoot = input.closest(
+      '.application-question, [class*="application-question" i], [class*="custom-question" i]'
+    );
+    const questionLabel = questionRoot?.querySelector?.(
+      '.application-label, [class*="application-label" i], [class*="question-label" i]'
+    );
+    if (questionLabel && !questionLabel.contains(input)) {
+      text = getElementText(questionLabel);
+    }
+  }
+
   if (!text) {
     text = normalizeValue(input.getAttribute?.("placeholder") || "");
   }
@@ -938,7 +955,7 @@ const fillAutocomplete = (visibleInput, hiddenInput, value, options = {}) => {
         const visibleRetained = Boolean(getElementCurrentValue(liveVisible));
         const hiddenRetained = !hiddenInput || Boolean(getElementCurrentValue(liveHidden));
         const valid = liveVisible.getAttribute?.("aria-invalid") !== "true" &&
-          (typeof liveVisible.checkValidity !== "function" || liveVisible.checkValidity());
+          safeCheckValidity(liveVisible);
 
         if (suggestionSelected && visibleRetained && hiddenRetained && valid) {
           markFilled(liveVisible, "autocomplete", source);
@@ -1491,9 +1508,7 @@ const registerAgentField = ({
         ? owners[0]
         : "";
   const primary = normalizedElements[0];
-  const nativeValid = typeof primary?.checkValidity === "function"
-    ? primary.checkValidity()
-    : true;
+  const nativeValid = safeCheckValidity(primary);
   const ariaInvalid = primary?.getAttribute?.("aria-invalid") === "true";
 
   agentFieldRegistry.set(fieldId, {
@@ -1544,6 +1559,19 @@ const getStandardCurrentValue = element => {
 const isChoiceChecked = element => {
   return element?.checked === true ||
     element?.getAttribute?.("aria-checked") === "true";
+};
+
+// checkValidity() THROWS a SyntaxError when the page declares an invalid
+// pattern attribute (Lever's email regex is rejected by newer Chrome's
+// v-flag parsing) — treat such fields as valid instead of letting the
+// exception abort an entire scan or apply pass.
+const safeCheckValidity = element => {
+  if (typeof element?.checkValidity !== "function") return true;
+  try {
+    return element.checkValidity();
+  } catch (_) {
+    return true;
+  }
 };
 
 const collectApplicationFields = (root = document, includeFilled = false) => {
@@ -1942,9 +1970,7 @@ const fillAgentAnswer = async answer => {
   const primary = field.elements[0];
   const ariaInvalid = primary?.getAttribute?.("aria-invalid") === "true";
   field.validity = {
-    valid:
-      !ariaInvalid &&
-      (typeof primary?.checkValidity !== "function" || primary.checkValidity()),
+    valid: !ariaInvalid && safeCheckValidity(primary),
     ariaInvalid,
     message: normalizeValue(primary?.validationMessage || "")
   };
@@ -2315,6 +2341,7 @@ window.FastApplyUtils = {
   getSemanticMatchScore,
   findBestSemanticMatch,
   getLabelText,
+  safeCheckValidity,
   getValueOwner,
   setValueOwner,
   isProtectedFromDeterministicFill,

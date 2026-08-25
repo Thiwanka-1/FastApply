@@ -12,6 +12,29 @@ const handleCustomQuestions = (profile) => {
   const eeo = profile.eeo || {};
   const highestEdu = profile.educationHistory && profile.educationHistory.length > 0 ? profile.educationHistory[0].degree : '';
 
+  const memoryAnswer = key => {
+    const answers = profile.applicationMemory?.answers;
+    if (!Array.isArray(answers)) return "";
+    const entry = answers.find(item => item?.key === key);
+    const answer = entry?.answer;
+    return answer === null || answer === undefined ? "" : String(answer);
+  };
+
+  const buildSalaryExpectation = () => {
+    const format = value => {
+      const amount = Number(String(value || '').replace(/[^\d.]/g, ''));
+      return Number.isFinite(amount) && amount > 0
+        ? amount.toLocaleString('en-US')
+        : '';
+    };
+    const currency = memoryAnswer('salaryCurrency') || 'USD';
+    const minimum = format(memoryAnswer('salaryMinimum'));
+    const maximum = format(memoryAnswer('salaryMaximum'));
+    if (minimum && maximum) return `Expected: ${currency} ${minimum} - ${maximum} per year`;
+    if (minimum) return `Expected: ${currency} ${minimum} per year`;
+    return memoryAnswer('expectedSalary');
+  };
+
   const questionBlocks = document.querySelectorAll('.application-question, .custom-question, label, .eeo-question');
 
   questionBlocks.forEach(block => {
@@ -75,6 +98,43 @@ const handleCustomQuestions = (profile) => {
     }
     if (questionText.includes('pronoun') && checkboxes.length > 0 && pInfo.pronouns) {
       if (window.FastApplyUtils.fillCheckbox(checkboxes, pInfo.pronouns)) filledAnything = true;
+    }
+
+    // --- Relocation / in-office willingness ("…willingness to live in or
+    // relocate to the X area") ---
+    if (
+      radios.length > 0 &&
+      /relocat|willing(ness)? to (live|move)/.test(questionText)
+    ) {
+      const relocateAnswer = eeo.willingToRelocate || memoryAnswer('willingToRelocate');
+      if (relocateAnswer && window.FastApplyUtils.fillRadio(radios, relocateAnswer)) {
+        filledAnything = true;
+      }
+    }
+
+    // --- Text questions answerable from stored data. Current-salary-only
+    // and notice-period questions are deliberately left alone (unknown). ---
+    const textInput = block.querySelector(
+      'textarea, input[type="text"]:not([name*="urls"]):not([name="name"]):not([name*="email"]):not([name*="phone"]):not([name*="location"]):not([name*="org"])'
+    );
+    if (
+      textInput &&
+      !String(textInput.value || "").trim() &&
+      textInput.dataset.fa_filled !== "true"
+    ) {
+      if (
+        /(desired|expected|expectation)[^?]{0,40}(salary|ctc|compensation)|(salary|ctc|compensation)[^?]{0,60}(desired|expected|expectations|going forward)/.test(questionText)
+      ) {
+        const salaryText = buildSalaryExpectation();
+        if (salaryText && window.FastApplyUtils.fillField(textInput, salaryText)) {
+          filledAnything = true;
+        }
+      } else if (/what city[^?]{0,40}located|city are you located/.test(questionText)) {
+        const cityText = [cInfo.city, cInfo.state].filter(Boolean).join(', ');
+        if (cityText && window.FastApplyUtils.fillField(textInput, cityText)) {
+          filledAnything = true;
+        }
+      }
     }
   });
   return filledAnything;
