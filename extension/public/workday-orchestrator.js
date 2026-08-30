@@ -1051,10 +1051,23 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
   const collectWorkdayFields = async () => {
     const standardFields = await window.FastApplyAgent2Controller.collectDefaultFields();
+    const contextualFields = getCurrentPage() === "EXPERIENCE_EDUCATION"
+      ? (W.prepareWorkdayEducationAgentFields?.(
+          standardFields,
+          W.lastProfile?.educationHistory
+        ) || standardFields)
+      : standardFields;
     const structuralFields = getCurrentPage() === "EXPERIENCE_EDUCATION"
       ? (W.collectReconciliationIssues?.(W.lastProfile) || [])
       : [];
-    return [...standardFields, ...structuralFields];
+    return [...contextualFields, ...structuralFields];
+  };
+
+  const applyWorkdayAnswers = answers => {
+    const contextualAnswers = W.applyWorkdayEducationAgentTargets?.(answers) || answers;
+    return window.FastApplyAgent2Controller.applyDefaultAnswers(
+      Array.isArray(contextualAnswers) ? contextualAnswers : []
+    );
   };
 
   const repairWorkdayFields = async () => {
@@ -1304,6 +1317,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     atsPlatform: "workday",
     runDeterministic: runWorkdayDeterministic,
     collectFields: collectWorkdayFields,
+    applyAnswers: applyWorkdayAnswers,
     repairFields: repairWorkdayFields,
     prepareScan: profile => {
       W.lastProfile = profile;

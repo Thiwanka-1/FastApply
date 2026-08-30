@@ -44,13 +44,17 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     const raw = String(value || "").trim();
     const key = W.normalizeText(raw).replace(/\bdegree\b/g, "").trim();
     const aliases = [
-      [/^(b e|be|beng|bachelor of engineering)$/, "Bachelor of Engineering"],
-      [/^(b a|ba|bachelor of arts)$/, "Bachelor of Arts"],
-      [/^(b s|bs|bsc|bachelor of science)$/, "Bachelor of Science"],
+      [/^(bachelor|bachelors)$/, "Bachelor's Degree"],
+      [/^(master|masters)$/, "Master's Degree"],
+      [/^(doctor|doctorate|doctoral)$/, "Doctorate Degree"],
+      [/^(associate|associates)$/, "Associate's Degree"],
+      [/^(b e|be|beng|bachelors? of engineering)$/, "Bachelor of Engineering"],
+      [/^(b a|ba|bachelors? of arts)$/, "Bachelor of Arts"],
+      [/^(b s|bs|bsc|bachelors? of science)$/, "Bachelor of Science"],
       [/^(bba|bachelor of business administration)$/, "Bachelor of Business Administration"],
       [/^(bcom|b comm|bachelor of commerce)$/, "Bachelor of Commerce"],
-      [/^(m a|ma|master of arts)$/, "Master of Arts"],
-      [/^(m s|ms|msc|master of science)$/, "Master of Science"],
+      [/^(m a|ma|masters? of arts)$/, "Master of Arts"],
+      [/^(m s|ms|msc|masters? of science)$/, "Master of Science"],
       [/^(mba|master of business administration)$/, "Master of Business Administration"],
       [/^(phd|ph d|doctor of philosophy)$/, "Doctor of Philosophy"],
       [/^(jd|j d|juris doctor)$/, "Juris Doctor"]
@@ -60,6 +64,64 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
   W.normalizeWorkdayDegree = normalizeDegree;
 
+  const getDegreeLevel = value => {
+    const normalized = W.normalizeText(value);
+    if (/\b(high school|secondary school|ged)\b/.test(normalized)) return "high-school";
+    if (/\b(associate|associates)\b/.test(normalized)) return "associate";
+    if (/\b(bachelor|bachelors|baccalaureate)\b/.test(normalized)) return "bachelor";
+    if (/\b(master|masters)\b/.test(normalized)) return "master";
+    if (/\b(doctor|doctorate|doctoral|phd|juris doctor)\b/.test(normalized)) {
+      return "doctorate";
+    }
+    if (/\b(certificate|certification)\b/.test(normalized)) return "certificate";
+    if (/\bdiploma\b/.test(normalized)) return "diploma";
+    return "";
+  };
+
+  const resolveDegreeOption = (options, targetValue) => {
+    const candidates = Array.from(options || []).filter(Boolean);
+    const target = normalizeDegree(targetValue);
+    if (!target || candidates.length === 0) return null;
+
+    const getText = option => typeof option === "string"
+      ? option
+      : W.getOptionText(option);
+    const exact = candidates.find(option => {
+      return W.normalizeText(getText(option)) === W.normalizeText(target);
+    });
+    if (exact) return exact;
+
+    const semantic = U?.findBestSemanticMatch?.(
+      candidates,
+      target,
+      getText,
+      { minimumScore: 0.8, minimumGap: 0.08 }
+    );
+    if (semantic) return semantic;
+
+    // A generic profile value such as "Master's Degree" must never fall
+    // through to the first option in the menu. Restrict any fallback to the
+    // same degree level, and only choose it when Workday exposes one clear
+    // generic/unique option at that level.
+    const targetLevel = getDegreeLevel(target);
+    if (!targetLevel) return null;
+    const sameLevel = candidates.filter(option => {
+      return getDegreeLevel(getText(option)) === targetLevel;
+    });
+    if (sameLevel.length === 1) return sameLevel[0];
+
+    const genericAtLevel = sameLevel.filter(option => {
+      const normalized = W.normalizeText(getText(option));
+      return /\b(degree|degree level|not specified|other)\b/.test(normalized) &&
+        !/\b(science|arts|engineering|business|commerce|administration|law|medicine)\b/.test(
+          normalized
+        );
+    });
+    return genericAtLevel.length === 1 ? genericAtLevel[0] : null;
+  };
+
+  W.resolveWorkdayEducationDegreeOption = resolveDegreeOption;
+
   const readLookupSelections = container => {
     if (!container) return [];
     const values = Array.from(container.querySelectorAll([
@@ -68,7 +130,12 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       '[class*="selectedItem"]',
       '[class*="multiValue"]',
       'button[aria-label^="Remove " i]'
-    ].join(","))).map(element => {
+    ].join(","))).filter(element => {
+      return !element.closest(
+        '[role="option"], [data-automation-id="promptOption"], ' +
+        '[data-automation-id="multiSelectOption"]'
+      );
+    }).map(element => {
       const ariaLabel = element.getAttribute("aria-label") || "";
       const title = element.getAttribute("title") || "";
       const text = /^remove\s+/i.test(ariaLabel)
@@ -78,6 +145,172 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     }).filter(value => value && !W.isWorkdayPlaceholder(value));
 
     return [...new Map(values.map(value => [W.normalizeText(value), value])).values()];
+  };
+
+  const lookupValuesMatch = (first, second) => {
+    const firstKey = W.normalizeText(first);
+    const secondKey = W.normalizeText(second);
+    return Boolean(firstKey && secondKey) && (
+      firstKey === secondKey ||
+      U?.smartMatch?.(first, second) === true
+    );
+  };
+
+  const getEducationFieldKind = question => {
+    const normalized = (W.normalizeQuestion || W.normalizeText)(question);
+    if (matchesQuestion(EDUCATION_ANCHOR, normalized)) return "school";
+    if (normalized === "degree" || normalized.includes("degree received")) return "degree";
+    if (
+      normalized.includes("field of study") ||
+      normalized === "major" ||
+      normalized.includes("area of study")
+    ) return "major";
+    return "";
+  };
+
+  const getEducationSectionRoot = () => {
+    return document.querySelector('[data-automation-id="educationSection"]');
+  };
+
+  const getEducationFieldDescriptor = control => {
+    if (!control) return null;
+    const sectionRoot = getEducationSectionRoot();
+    const section = W.findSection?.(["education", "education history", "academic history"]);
+    const labels = (sectionRoot
+      ? Array.from(sectionRoot.querySelectorAll("label"))
+      : W.querySection(section, "label")
+    ).filter(W.isVisible);
+    const linkedLabel = (
+      control.id
+        ? control.getRootNode()?.querySelector?.(`label[for="${CSS.escape(control.id)}"]`)
+        : null
+    );
+    const label = linkedLabel || labels.find(candidate => {
+      const candidateContainer = W.getFieldContainer?.(candidate);
+      return candidate.control === control || candidateContainer?.contains(control);
+    });
+    if (!label) return null;
+
+    const isInEducation = sectionRoot?.contains(label) || W.isInSection?.(label, section);
+    if (!isInEducation) return null;
+    const kind = getEducationFieldKind(W.getElementText(label));
+    if (!kind) return null;
+
+    const container = W.getFieldContainer?.(label) || control.parentElement;
+    const labelIndex = labels.indexOf(label);
+    const anchorsBefore = labels.slice(0, labelIndex + 1).filter(candidate => {
+      return getEducationFieldKind(W.getElementText(candidate)) === "school";
+    }).length;
+
+    return {
+      kind,
+      index: Math.max(0, anchorsBefore - 1),
+      label,
+      container
+    };
+  };
+
+  W.getWorkdayEducationFieldDescriptor = getEducationFieldDescriptor;
+  W.isWorkdayEducationLookupControl = control => {
+    const kind = getEducationFieldDescriptor(control)?.kind;
+    return kind === "school" || kind === "major";
+  };
+
+  const committedLookupValues = new Map();
+
+  const getLookupCommitKey = descriptor => {
+    return descriptor ? `${descriptor.index}:${descriptor.kind}` : "";
+  };
+
+  W.hasCommittedEducationLookupSelection = (control, wrapper = null) => {
+    if (!control || !W.isWorkdayEducationLookupControl(control)) return false;
+    const descriptor = getEducationFieldDescriptor(control);
+    const container = descriptor?.container || wrapper;
+    if (readLookupSelections(container).length > 0) return true;
+    const rememberedValue = committedLookupValues.get(getLookupCommitKey(descriptor));
+    if (rememberedValue && lookupValuesMatch(control.value, rememberedValue)) return true;
+    return control.dataset.fa_education_lookup_committed === "true" &&
+      Boolean(String(control.dataset.fa_education_lookup_value || "").trim());
+  };
+
+  const closeEducationLookupPopup = async input => {
+    try {
+      document.body.click();
+    } catch (_) {}
+    await W.waitFor(() => {
+      return W.getWorkdayOptions(input).length === 0 ? true : null;
+    }, { timeout: 1800, interval: 120 });
+    await W.wait(180);
+  };
+
+  W.commitWorkdayEducationLookupOption = async (option, input) => {
+    if (!option || !input || !W.isWorkdayEducationLookupControl(input)) return false;
+    const descriptor = getEducationFieldDescriptor(input);
+    const container = descriptor?.container || input.parentElement;
+    const beforeKeys = new Set(readLookupSelections(container).map(W.normalizeText));
+    const optionLabel = W.getOptionText(option);
+    const optionContainer = option.closest?.("li") ||
+      option.closest?.('[role="option"]') || option;
+    const commitTarget = optionContainer.querySelector?.([
+      ".wd-icon-container",
+      'input[type="checkbox"]',
+      'input[type="radio"]',
+      '[role="checkbox"]',
+      '[role="radio"]',
+      '[data-automation-id*="checkbox" i]',
+      '[data-automation-id*="radio" i]'
+    ].join(",")) || optionContainer;
+
+    const isAcknowledged = () => {
+      if (!optionContainer.isConnected || !W.isVisible(optionContainer)) return true;
+      if (W.isWorkdayOptionSelected?.(optionContainer)) return true;
+      return readLookupSelections(container).some(value => {
+        return !beforeKeys.has(W.normalizeText(value));
+      });
+    };
+
+    if (!isAcknowledged()) {
+      let clicked = W.clickElement(commitTarget);
+      if (!clicked && commitTarget?.isConnected && typeof commitTarget.click === "function") {
+        try {
+          commitTarget.click();
+          clicked = true;
+        } catch (_) {}
+      }
+      if (!clicked) return false;
+
+      let acknowledged = await W.waitFor(isAcknowledged, {
+        timeout: 1800,
+        interval: 120
+      });
+      if (!acknowledged && commitTarget !== optionContainer) {
+        W.clickElement(optionContainer);
+        acknowledged = await W.waitFor(isAcknowledged, {
+          timeout: 1500,
+          interval: 120
+        });
+      }
+      if (!acknowledged) return false;
+    }
+
+    await closeEducationLookupPopup(input);
+    const selectedValues = readLookupSelections(container);
+    const currentValue = String(input.value || "").trim();
+    const retained = selectedValues.some(value => {
+      return lookupValuesMatch(value, optionLabel);
+    }) || (
+      W.getWorkdayOptions(input).length === 0 &&
+      lookupValuesMatch(currentValue, optionLabel)
+    );
+
+    if (!retained) return false;
+    committedLookupValues.set(
+      getLookupCommitKey(descriptor),
+      optionLabel || currentValue
+    );
+    input.dataset.fa_education_lookup_committed = "true";
+    input.dataset.fa_education_lookup_value = optionLabel || currentValue;
+    return true;
   };
 
   W.fillLookupInputAsync = async (input, value, settings = {}) => {
@@ -95,7 +328,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     // Deterministic autofill never replaces a real lookup choice. Agent audit
     // handles correctness separately.
     if (existingSelections.length) {
-      return true;
+      return existingSelections.some(selection => lookupValuesMatch(selection, target));
     }
 
     const inputOwner = U?.getValueOwner?.(input) || "";
@@ -122,7 +355,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
     try {
       W.clickElement(input);
-      W.setInputValue(input, target);
+      W.typeInputValue(input, target);
 
       if (settings.pressEnter === true) {
         await W.wait(120);
@@ -134,8 +367,10 @@ window.WorkdayEngine = window.WorkdayEngine || {};
         const exact = options.find(option => {
           return W.normalizeText(W.getElementText(option)) === targetKey;
         });
-        return exact || W.findBestOption(options, target) ||
-          (settings.selectTopResult === true ? options[0] : null);
+        return exact || W.findBestOption(options, target, {
+          minimumScore: Number(settings.minimumScore) || 0.74,
+          minimumGap: Number(settings.minimumGap) || 0.06
+        });
       }, { timeout: 6500, interval: 180 });
 
       if (!match) {
@@ -148,27 +383,11 @@ window.WorkdayEngine = window.WorkdayEngine || {};
 
       await W.wait(240);
       const liveOptions = W.getWorkdayOptions(input);
-      const liveMatch = W.findBestOption(liveOptions, target) ||
-        (settings.selectTopResult === true ? liveOptions[0] : null) ||
-        match;
-      const matchedLabel = W.getElementText(liveMatch);
-      const beforeKeys = new Set(existingSelections.map(W.normalizeText));
-      const confirmed = await W.selectWorkdayOption(liveMatch, () => {
-        const selected = readLookupSelections(container);
-        if (selected.some(item => !beforeKeys.has(W.normalizeText(item)))) return true;
-
-        const current = W.normalizeText(input.value);
-        const expected = W.normalizeText(matchedLabel || target);
-        return (
-          input.getAttribute("aria-expanded") !== "true" &&
-          current &&
-          current === expected
-        );
-      }, {
-        perTargetTimeout: 1200,
-        finalTimeout: 3500,
-        control: input
-      });
+      const liveMatch = W.findBestOption(liveOptions, target, {
+        minimumScore: Number(settings.minimumScore) || 0.74,
+        minimumGap: Number(settings.minimumGap) || 0.06
+      }) || match;
+      const confirmed = await W.commitWorkdayEducationLookupOption(liveMatch, input);
 
       if (!confirmed) {
         W.debug?.("lookup selection did not confirm:", target);
@@ -188,8 +407,40 @@ window.WorkdayEngine = window.WorkdayEngine || {};
     }
   };
 
-  W.safeFillEduDropdown = (container, targetValue) => {
-    return W.fillDeterministicDropdown(container, targetValue);
+  W.safeFillEduDropdown = async (container, targetValue) => {
+    const target = normalizeDegree(targetValue);
+    if (!container || !target) return false;
+    const trigger = container.querySelector([
+      '[data-automation-id="selectWidget"]',
+      '[role="combobox"][aria-haspopup="listbox"]',
+      'input[role="combobox"]',
+      '[aria-haspopup="listbox"]'
+    ].join(","));
+    if (!trigger) return false;
+
+    const current = W.readDropdownValue(container, trigger);
+    if (current) {
+      return W.normalizeText(current) === W.normalizeText(target) ||
+        (
+          getDegreeLevel(current) &&
+          getDegreeLevel(current) === getDegreeLevel(target) &&
+          U?.smartMatch?.(current, target) === true
+        );
+    }
+
+    const options = await W.openDropdown(trigger, { timeout: 4500 });
+    const match = resolveDegreeOption(options, target);
+    if (!match) {
+      W.debug?.("no unambiguous education degree option matched:", target);
+      W.closeDropdown(trigger);
+      return false;
+    }
+
+    return W.fillDeterministicDropdown(
+      container,
+      W.getOptionText(match),
+      { exact: true }
+    );
   };
 
   const getControl = (label, container) => {
@@ -210,6 +461,88 @@ window.WorkdayEngine = window.WorkdayEngine || {};
       'input[role="combobox"], input[aria-haspopup="listbox"], input[data-automation-id="searchBox"]'
     )
   );
+
+  const educationAgentTargets = new Map();
+  W.educationAgentTargets = educationAgentTargets;
+
+  W.prepareWorkdayEducationAgentFields = (fields, educationHistory) => {
+    educationAgentTargets.clear();
+    const history = Array.isArray(educationHistory) ? educationHistory : [];
+
+    return Array.from(fields || []).map(field => {
+      let control = null;
+      try {
+        control = document.querySelector(
+          `[data-fa_agent_field_id="${CSS.escape(String(field?.fieldId || ""))}"]`
+        );
+      } catch (_) {}
+
+      const descriptor = getEducationFieldDescriptor(control);
+      if (!descriptor || !history[descriptor.index]) return field;
+
+      const education = history[descriptor.index];
+      const profileKey = descriptor.kind === "school"
+        ? "school"
+        : descriptor.kind === "degree"
+          ? "degree"
+          : "major";
+      const profileValue = String(education?.[profileKey] || "").trim();
+      if (!profileValue) return field;
+
+      let value = profileValue;
+      let unresolvedReason = "";
+      if (descriptor.kind === "degree" && Array.isArray(field.options)) {
+        const option = resolveDegreeOption(field.options, profileValue);
+        if (option) {
+          value = typeof option === "string" ? option : W.getOptionText(option);
+        } else if (field.options.length > 0) {
+          value = "";
+          unresolvedReason =
+            `No unambiguous ${getDegreeLevel(profileValue) || "matching"} degree option was available.`;
+        }
+      }
+
+      educationAgentTargets.set(field.fieldId, {
+        value,
+        unresolvedReason,
+        index: descriptor.index,
+        profileKey
+      });
+
+      return {
+        ...field,
+        label: `Education ${descriptor.index + 1} - ${field.label}`
+      };
+    });
+  };
+
+  W.applyWorkdayEducationAgentTargets = answers => {
+    return Array.from(answers || []).map(answer => {
+      const target = educationAgentTargets.get(answer?.fieldId);
+      if (!target) return answer;
+
+      if (!target.value) {
+        return {
+          ...answer,
+          value: "",
+          source: "profile",
+          confidence: 0,
+          requiresReview: true,
+          reviewReason: target.unresolvedReason ||
+            "The profile education value could not be mapped to a Workday option."
+        };
+      }
+
+      return {
+        ...answer,
+        value: target.value,
+        source: "profile",
+        confidence: 1,
+        requiresReview: false,
+        reviewReason: ""
+      };
+    });
+  };
 
   W.handleEducation = async educationHistory => {
     if (!Array.isArray(educationHistory) || educationHistory.length === 0) return false;
@@ -290,8 +623,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
           if (matchesQuestion(EDUCATION_ANCHOR, question)) {
             if (isLookupControl(input)) {
               await W.fillLookupInputAsync(input, education.school, {
-                pressEnter: true,
-                selectTopResult: true
+                pressEnter: true
               });
             }
             else W.fillDeterministicText(input, education.school);
@@ -300,7 +632,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
               '[data-automation-id="selectWidget"], [role="combobox"], [aria-haspopup="listbox"]'
             );
             if (hasDropdown) {
-              await W.safeFillEduDropdown(container, normalizeDegree(education.degree));
+              await W.safeFillEduDropdown(container, education.degree);
             }
             else W.fillDeterministicText(input, education.degree);
           } else if (
@@ -310,8 +642,7 @@ window.WorkdayEngine = window.WorkdayEngine || {};
           ) {
             if (isLookupControl(input)) {
               await W.fillLookupInputAsync(input, education.major, {
-                pressEnter: false,
-                selectTopResult: true
+                pressEnter: false
               });
             }
             else W.fillDeterministicText(input, education.major);

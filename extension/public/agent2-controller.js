@@ -274,6 +274,15 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
 
   const hasCommittedSearchSelection = field => {
     if (!field?.control || !field?.wrapper) return false;
+    if (
+      configuration?.atsPlatform === "workday" &&
+      window.WorkdayEngine?.isWorkdayEducationLookupControl?.(field.control)
+    ) {
+      return window.WorkdayEngine.hasCommittedEducationLookupSelection(
+        field.control,
+        field.wrapper
+      );
+    }
     if (field.control.dataset.fa_filled === "true") return true;
     return Boolean(field.wrapper.querySelector([
       '[data-automation-id^="selectedItem"]',
@@ -680,6 +689,13 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
         controlIndex
       ].join("|"))}`;
 
+      if (
+        configuration?.atsPlatform === "workday" &&
+        window.WorkdayEngine?.getWorkdayEducationFieldDescriptor?.(control)
+      ) {
+        control.dataset.fa_agent_field_id = fieldId;
+      }
+
       const multiple =
         listbox?.getAttribute("aria-multiselectable") === "true" ||
         /\ball that apply\b|\bselect all\b|\bchoose all\b/i.test(label);
@@ -865,6 +881,17 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
     try {
       if (
         configuration?.atsPlatform === "workday" &&
+        window.WorkdayEngine?.isWorkdayEducationLookupControl?.(control) &&
+        window.WorkdayEngine?.commitWorkdayEducationLookupOption
+      ) {
+        return await window.WorkdayEngine.commitWorkdayEducationLookupOption(
+          option,
+          control
+        );
+      }
+
+      if (
+        configuration?.atsPlatform === "workday" &&
         window.WorkdayEngine?.selectWorkdayOption
       ) {
         const selected = await window.WorkdayEngine.selectWorkdayOption(
@@ -990,10 +1017,11 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
     }
 
     const normalizedLabel = normalizeText(field.label);
-    const isSchoolLookup = /\b(school|university|institution)\b/.test(normalizedLabel);
-    const isFieldOfStudyLookup = /\b(field of study|area of study|major)\b/.test(
-      normalizedLabel
-    );
+    const educationDescriptor = configuration?.atsPlatform === "workday"
+      ? window.WorkdayEngine?.getWorkdayEducationFieldDescriptor?.(field.control)
+      : null;
+    const isSchoolLookup = educationDescriptor?.kind === "school" ||
+      /\b(school|university|institution)\b/.test(normalizedLabel);
 
     if (configuration?.atsPlatform === "workday" && isSchoolLookup) {
       await delay(120);
@@ -1002,9 +1030,9 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
 
     await delay(250);
     const option = await findSemanticOption(field, target, {
-      selectTopResult:
-        configuration?.atsPlatform === "workday" &&
-        (isSchoolLookup || isFieldOfStudyLookup)
+      // Education lookups must select a compatible result, never merely the
+      // first row returned by Workday's search ranking.
+      selectTopResult: false
     });
     const selectedOptionLabel = cleanText(option?.innerText || option?.textContent || "");
     if (!option || !selectedOptionLabel || !await clickSemanticOption(option, field.control)) {
