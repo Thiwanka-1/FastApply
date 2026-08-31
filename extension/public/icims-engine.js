@@ -254,12 +254,18 @@ window.ICIMSEngine.runAutofill = async (profile) => {
         const c = profile.contactInfo || {};
         const e = profile.eeo || {};
         
-        const fullLegalName = p.firstName && p.lastName ? `${p.firstName} ${p.lastName}` : "";
+        const fullLegalName = p.firstName && p.lastName
+            ? [p.firstName, p.middleName, p.lastName]
+                .map(part => String(part || "").trim())
+                .filter(Boolean)
+                .join(" ")
+            : "";
         const preferredName = p.preferredName || p.firstName;
 
         // PAGE 1: Personal Info
         window.ICIMSEngine.setNativeValue(window.ICIMSEngine.findInputByLabelText("First Name"), p.firstName);
         window.ICIMSEngine.setNativeValue(window.ICIMSEngine.findInputByLabelText("Preferred First Name"), preferredName);
+        window.ICIMSEngine.setNativeValue(window.ICIMSEngine.findInputByLabelText("Middle Name"), p.middleName);
         window.ICIMSEngine.setNativeValue(window.ICIMSEngine.findInputByLabelText("Last Name"), p.lastName);
         window.ICIMSEngine.setNativeValue(window.ICIMSEngine.findInputByLabelText("Full Legal Name for Offer"), fullLegalName);
         window.ICIMSEngine.setNativeValue(window.ICIMSEngine.findInputByLabelText("Email"), c.email);

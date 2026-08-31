@@ -39,7 +39,13 @@ const handleCustomQuestions = (profile) => {
 
   questionBlocks.forEach(block => {
     const questionText = block.innerText.toLowerCase();
-    const selects = block.querySelectorAll('select') || [block.nextElementSibling?.querySelector('select')].filter(Boolean);
+    // querySelectorAll never returns a falsy value, so the old
+    // `... || [nextElementSibling...]` fallback was dead code and selects
+    // rendered beside (not inside) the label block were never found.
+    let selects = Array.from(block.querySelectorAll('select'));
+    if (selects.length === 0 && block.nextElementSibling) {
+      selects = Array.from(block.nextElementSibling.querySelectorAll('select'));
+    }
     const radios = block.querySelectorAll('input[type="radio"]');
     const checkboxes = block.querySelectorAll('input[type="checkbox"]');
 

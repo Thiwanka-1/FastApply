@@ -296,11 +296,26 @@ const cleanApplicationMemory = (memory) => {
 };
 
 const normalizeExtractedProfile = (data = {}) => {
+  const middleName = cleanText(data.personalInfo?.middleName);
+  let preferredName = cleanText(data.personalInfo?.preferredName);
+
+  // Older extractions (and occasional model slips) filed the middle name
+  // under preferredName. A "preferred name" identical to the middle name is
+  // never a real nickname — keep it only as the middle name.
+  if (
+    preferredName &&
+    middleName &&
+    normalizeComparable(preferredName) === normalizeComparable(middleName)
+  ) {
+    preferredName = '';
+  }
+
   return {
     personalInfo: {
       firstName: cleanText(data.personalInfo?.firstName),
+      middleName,
       lastName: cleanText(data.personalInfo?.lastName),
-      preferredName: cleanText(data.personalInfo?.preferredName),
+      preferredName,
       pronouns: cleanText(data.personalInfo?.pronouns),
       languages: cleanLanguages(data.personalInfo?.languages)
     },
@@ -2006,6 +2021,7 @@ const evidenceValueSupportsAnswer = ({
 
 const PROFILE_EVIDENCE_LABEL_RULES = [
   [/personalinfo\.firstname$/i, /\b(first|given) name\b/i],
+  [/personalinfo\.middlename$/i, /\bmiddle (name|initial)s?\b/i],
   [/personalinfo\.lastname$/i, /\b(last|family|surname) name\b/i],
   [/personalinfo\.preferredname$/i, /\bpreferred name\b/i],
   [/personalinfo\.pronouns$/i, /\bpronouns?\b/i],
@@ -2105,16 +2121,25 @@ const validateAgentEvidence = ({
 
     const fieldLabel = normalizeComparable(field?.label);
     const isFullNameField = /\b(full name|legal name|your name)\b/.test(fieldLabel);
-    const profileName = [
-      candidateContext.profile?.personalInfo?.firstName,
-      candidateContext.profile?.personalInfo?.lastName
-    ].map(cleanText).filter(Boolean).join(' ');
+    const nameParts = {
+      first: cleanText(candidateContext.profile?.personalInfo?.firstName),
+      middle: cleanText(candidateContext.profile?.personalInfo?.middleName),
+      last: cleanText(candidateContext.profile?.personalInfo?.lastName)
+    };
+    // Both "First Last" and "First Middle Last" are valid full-name answers.
+    const profileNames = [
+      [nameParts.first, nameParts.last],
+      [nameParts.first, nameParts.middle, nameParts.last]
+    ]
+      .map(parts => parts.filter(Boolean).join(' '))
+      .filter(Boolean);
 
     if (
       isFullNameField &&
-      profileName &&
-      normalizeComparable(answer?.value) === normalizeComparable(profileName) &&
-      /^personalInfo\.(firstName|lastName)$/i.test(
+      profileNames.some(name => {
+        return normalizeComparable(answer?.value) === normalizeComparable(name);
+      }) &&
+      /^personalInfo\.(firstName|middleName|lastName)$/i.test(
         evidenceKey.replace(/^profile\./i, '')
       )
     ) {
@@ -2676,10 +2701,23 @@ const applyStructuredAnswerFallbacks = ({
     const label = normalizeComparable(field.label);
 
     if (/\bpreferred (first|given) name\b/.test(label)) return personal.preferredName;
-    if (/\b(first|given) name\b/.test(label) && !/preferred/.test(label)) {
+    if (/\bmiddle initials?\b/.test(label)) {
+      return cleanText(personal.middleName).charAt(0).toUpperCase();
+    }
+    if (/\bmiddle names?\b/.test(label)) return personal.middleName;
+    if (/\b(first|given) name\b/.test(label) && !/preferred|middle/.test(label)) {
       return personal.firstName;
     }
     if (/\b(last|family|surname) name\b/.test(label)) return personal.lastName;
+    if (
+      /\b(full|legal) name\b/.test(label) &&
+      !/(first|last|middle|preferred)/.test(label)
+    ) {
+      return [personal.firstName, personal.middleName, personal.lastName]
+        .map(cleanText)
+        .filter(Boolean)
+        .join(' ');
+    }
     if (/\bemail( address)?\b/.test(label)) return contact.email;
     if (/\bphone (number|mobile)\b|\btelephone\b/.test(label) && !/extension|code/.test(label)) {
       return contact.phone;
@@ -2971,7 +3009,7 @@ export const uploadResume = async (req, res, next) => {
 export const clearEntireProfile = async (req, res, next) => {
   try {
     const emptyProfileData = {
-      personalInfo: { firstName: '', lastName: '', preferredName: '', pronouns: '', languages: [] },
+      personalInfo: { firstName: '', middleName: '', lastName: '', preferredName: '', pronouns: '', languages: [] },
       contactInfo: { email: '', phone: '', addressLine1: '', addressLine2: '', city: '', state: '', country: '', postalCode: '' },
       websitesAndSkills: { linkedin: '', github: '', twitter: '', portfolio: '', skills: [] },
       workHistory: [],
@@ -3001,7 +3039,7 @@ export const clearProfileSection = async (req, res, next) => {
     
     // Define the valid sections and their empty states
     const validSections = {
-      personalInfo: { firstName: '', lastName: '', preferredName: '', pronouns: '', languages: [] },
+      personalInfo: { firstName: '', middleName: '', lastName: '', preferredName: '', pronouns: '', languages: [] },
       contactInfo: { email: '', phone: '', addressLine1: '', addressLine2: '', city: '', state: '', country: '', postalCode: '' },
       websitesAndSkills: { linkedin: '', github: '', twitter: '', portfolio: '', skills: [] },
       workHistory: [],

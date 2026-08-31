@@ -37,11 +37,19 @@ export default function PersonalInfo({ data, updateSection }) {
           />
         </div>
         <div>
-          <label className="block text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2">Legal Last Name</label>
-          <input 
-            type="text" name="lastName" value={data?.lastName || ''} onChange={handleChange}
+          <label className="block text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2">Middle Name (Optional)</label>
+          <input
+            type="text" name="middleName" value={data?.middleName || ''} onChange={handleChange}
             className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3.5 text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-400 transition-all placeholder-slate-700"
             placeholder="e.g. Arunod"
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-semibold text-slate-400 uppercase tracking-widest mb-2">Legal Last Name</label>
+          <input
+            type="text" name="lastName" value={data?.lastName || ''} onChange={handleChange}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3.5 text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-400 transition-all placeholder-slate-700"
+            placeholder="e.g. Perera"
           />
         </div>
         <div>

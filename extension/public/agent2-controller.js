@@ -155,6 +155,18 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
     });
   };
 
+  // Extracts a stable origin+pathname from a pageIdentity JSON string. Used
+  // for the mid-run navigation guard: company/title text re-rendering on SPA
+  // career sites must not abort a run that is still on the same page.
+  const comparableIdentityUrl = identity => {
+    try {
+      const parsed = new URL(JSON.parse(identity).url);
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch (_) {
+      return cleanText(identity);
+    }
+  };
+
   const countDeterministicFields = () => {
     return U.queryAgentElements(
       document,
@@ -464,7 +476,19 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       ].join(",")
     ).filter(isVisible);
 
-    return visibleListboxes[visibleListboxes.length - 1] || null;
+    if (visibleListboxes.length > 0) {
+      return visibleListboxes[visibleListboxes.length - 1];
+    }
+
+    // Some ATS widgets (Cornerstone, several career-site frameworks) render
+    // their dropdown as a menu instead of a listbox. Only consulted when no
+    // listbox-shaped popup exists, so listbox-based platforms are unaffected.
+    const visibleMenus = U.queryAgentElements(document, '[role="menu"]')
+      .filter(menu => {
+        return isVisible(menu) && menu.querySelector?.('[role^="menuitem"]');
+      });
+
+    return visibleMenus[visibleMenus.length - 1] || null;
   };
 
   const waitForSemanticListbox = async (control, timeout = 2500) => {
@@ -484,6 +508,9 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       listbox,
       [
         '[role="option"]',
+        '[role="menuitem"]',
+        '[role="menuitemradio"]',
+        '[role="menuitemcheckbox"]',
         '[data-automation-id="promptOption"]',
         '[data-automation-id="multiSelectOption"]',
         '[data-automation-id="menuItem"]',
@@ -664,7 +691,14 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       }
 
       openSemanticDropdown(control);
-      const listbox = await waitForSemanticListbox(control);
+      let listbox = await waitForSemanticListbox(control);
+      if (!listbox) {
+        // Some frameworks need a focused control before the first click
+        // registers — one retry recovers those without slowing the rest.
+        try { control.focus?.(); } catch (_) {}
+        openSemanticDropdown(control);
+        listbox = await waitForSemanticListbox(control, 1500);
+      }
       const options = await collectSemanticOptions(listbox);
       await closeSemanticDropdown(control);
       await delay(160);
@@ -737,13 +771,424 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
     return fields;
   };
 
+  // ---------------------------------------------------------------------
+  // Button-style choice questions (segmented Yes/No pairs, aria-pressed
+  // toggle groups). Ashby, Phenom and several career-site frameworks render
+  // these as plain <button> elements — no input, no role="radio" — so
+  // neither the standard nor the semantic collector could see them.
+  // ---------------------------------------------------------------------
+  const buttonAgentFields = new Map();
+
+  const CHOICE_BUTTON_ACTION_TEXT =
+    /^(add|remove|delete|upload|attach|submit|apply|save|cancel|next|back|continue|close|clear|edit|browse|search|show|hide|view|open|menu|more|expand|collapse|dismiss|previous|skip|autofill|sign in|log ?in|sign up|register|accept all|reject all|manage|got it|learn more|read more|copy|share|print|download|start|finish|retry|refresh|reload)\b/i;
+
+  // Only true selection ARIA states qualify a group as a choice widget.
+  // A bare data-state attribute is NOT enough: Radix-style UIs stamp it on
+  // accordions and tabs, and treating section toggles as answerable
+  // questions would let the agent click them open. data-state still counts
+  // when READING pressed-ness of an already-qualified group.
+  const choiceButtonHasStateAttribute = button => {
+    return button.hasAttribute("aria-pressed") ||
+      button.hasAttribute("aria-selected") ||
+      button.hasAttribute("aria-checked");
+  };
+
+  const isChoiceButtonPressed = button => {
+    return button.getAttribute("aria-pressed") === "true" ||
+      button.getAttribute("aria-selected") === "true" ||
+      button.getAttribute("aria-checked") === "true" ||
+      /^(checked|selected|active|on|true)$/i.test(
+        button.getAttribute("data-state") || ""
+      );
+  };
+
+  const getNearbyQuestionText = start => {
+    const groupWrap = start?.closest?.(
+      'fieldset, [role="group"], [role="radiogroup"]'
+    );
+
+    if (groupWrap) {
+      const legendText = cleanText(
+        groupWrap.querySelector?.("legend")?.innerText
+      );
+      if (legendText) return legendText;
+
+      const ariaLabel = cleanText(groupWrap.getAttribute?.("aria-label"));
+      if (ariaLabel) return ariaLabel;
+
+      const labelledBy = groupWrap.getAttribute?.("aria-labelledby");
+      if (labelledBy) {
+        const text = labelledBy
+          .split(/\s+/)
+          .map(id => cleanText(document.getElementById(id)?.innerText))
+          .filter(Boolean)
+          .join(" ");
+        if (text) return text;
+      }
+    }
+
+    // The question text is usually a plain-text block directly before the
+    // buttons (possibly a few ancestors up). Skip siblings holding controls:
+    // those are other option rows or unrelated fields.
+    let node = start;
+    for (let depth = 0; node && depth < 6; depth += 1) {
+      let sibling = node.previousElementSibling;
+      while (sibling) {
+        if (!sibling.querySelector?.("input, button, select, textarea")) {
+          const text = cleanText(sibling.innerText);
+          if (text.length > 5) return text;
+        }
+        sibling = sibling.previousElementSibling;
+      }
+      node = node.parentElement;
+    }
+
+    return "";
+  };
+
+  const scanButtonChoiceGroups = () => {
+    const groups = new Map();
+
+    U.queryAgentElements(document, 'button, [role="button"]').forEach(button => {
+      if (!isVisible(button) || button.disabled) return;
+      if (button.getAttribute("aria-disabled") === "true") return;
+      if (button.matches(
+        '[aria-haspopup], [role="radio"], [role="checkbox"], [role="switch"], ' +
+        '[role="option"], [role="tab"], [type="submit"], [type="reset"]'
+      )) return;
+      if (button.closest(
+        'header, nav, footer, [role="banner"], [role="navigation"], ' +
+        '[role="toolbar"], [class*="toolbar"], [role="listbox"], [role="menu"]'
+      )) return;
+      if (button.querySelector("input, select, textarea")) return;
+
+      const text = cleanText(button.innerText);
+      if (!text || text.length < 2 || text.length > 40) return;
+      if (/^\d+$/.test(text)) return;
+      if (CHOICE_BUTTON_ACTION_TEXT.test(text)) return;
+
+      const container = button.parentElement;
+      if (!container) return;
+      if (!groups.has(container)) groups.set(container, []);
+      groups.get(container).push(button);
+    });
+
+    const results = [];
+
+    groups.forEach((buttons, container) => {
+      if (buttons.length < 2 || buttons.length > 8) return;
+
+      const texts = buttons.map(button => cleanText(button.innerText));
+      const textKeys = texts.map(normalizeText);
+      if (new Set(textKeys).size !== textKeys.length) return;
+
+      const stateful = buttons.every(choiceButtonHasStateAttribute);
+      const yesNoPair = textKeys.length === 2 &&
+        textKeys.includes("yes") &&
+        textKeys.includes("no");
+      if (!stateful && !yesNoPair) return;
+
+      const label = cleanText(getNearbyQuestionText(container)).slice(0, 500);
+      if (!label || /\bcookies?\b/i.test(label)) return;
+
+      results.push({ buttons, container, texts, stateful, label });
+    });
+
+    return results;
+  };
+
+  const collectButtonChoiceFields = () => {
+    buttonAgentFields.clear();
+    // Workday renders every choice as radio inputs or listbox widgets that
+    // the existing collectors already own — leave its field set untouched.
+    if (configuration?.atsPlatform === "workday") return [];
+
+    const fields = [];
+
+    scanButtonChoiceGroups().forEach(group => {
+      const owners = [...new Set(
+        group.buttons.map(button => U.getValueOwner?.(button) || "").filter(Boolean)
+      )];
+      const valueOwner = owners.includes("user")
+        ? "user"
+        : owners.includes("agent")
+          ? "agent"
+          : owners[0] || "";
+      const pressedTexts = group.buttons
+        .filter(isChoiceButtonPressed)
+        .map(button => cleanText(button.innerText));
+      const currentValue = pressedTexts[0] || "";
+
+      // A stateless group something already answered cannot be audited
+      // reliably (there is no attribute revealing which button won) — skip
+      // it rather than risk clicking a second time.
+      if (
+        !group.stateful &&
+        (valueOwner || group.buttons.some(button => {
+          return button.dataset.fa_filled === "true";
+        }))
+      ) return;
+
+      // Content-based id: stable across re-scans and wave audits even when
+      // sibling groups appear or disappear. Identical twin groups (same
+      // question, same options) fall back to an encounter-order suffix.
+      const baseFieldId = `fa_buttons_${hashText([
+        configuration?.getPageKey?.() || window.location.pathname,
+        group.label,
+        group.texts.map(normalizeText).join("|")
+      ].join("::"))}`;
+      let fieldId = baseFieldId;
+      let suffix = 2;
+      while (buttonAgentFields.has(fieldId)) {
+        fieldId = `${baseFieldId}_${suffix}`;
+        suffix += 1;
+      }
+
+      buttonAgentFields.set(fieldId, {
+        buttons: group.buttons,
+        container: group.container,
+        label: group.label,
+        options: group.texts,
+        stateful: group.stateful,
+        currentValue,
+        valueOwner
+      });
+
+      fields.push({
+        fieldId,
+        label: group.label,
+        type: "radio",
+        required:
+          group.container.getAttribute?.("aria-required") === "true" ||
+          /\*/.test(group.label),
+        options: group.texts,
+        multiple: false,
+        currentValue,
+        maxLength: null,
+        valueOwner,
+        validity: { valid: true, ariaInvalid: false, message: "" }
+      });
+    });
+
+    return fields;
+  };
+
+  const markButtonState = (field, state, reason = "") => {
+    const target = field.container || field.buttons?.[0];
+    if (!target) return;
+
+    target.dataset.fa_agent_processed = "true";
+    target.dataset.fa_agent_state = state;
+    target.dataset.fa_agent_reason = reason;
+
+    try {
+      target.style.border = state === "review"
+        ? "2px solid #f59e0b"
+        : state === "unresolved"
+          ? "2px dashed #ef4444"
+          : "2px solid #06b6d4";
+    } catch (_) {}
+  };
+
+  const refreshButtonFieldNodes = field => {
+    if (field.buttons.every(button => button?.isConnected)) return true;
+
+    const wantedKey = `${normalizeText(field.label)}::${
+      field.options.map(normalizeText).join("|")
+    }`;
+    const match = scanButtonChoiceGroups().find(group => {
+      return `${normalizeText(group.label)}::${
+        group.texts.map(normalizeText).join("|")
+      }` === wantedKey;
+    });
+
+    if (!match) return false;
+    field.buttons = match.buttons;
+    field.container = match.container;
+    return true;
+  };
+
+  const clickChoiceButton = button => {
+    try {
+      button.focus?.();
+      if (typeof PointerEvent === "function") {
+        button.dispatchEvent(new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          pointerType: "mouse",
+          isPrimary: true
+        }));
+      }
+      button.dispatchEvent(new MouseEvent("mousedown", {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      }));
+      if (typeof PointerEvent === "function") {
+        button.dispatchEvent(new PointerEvent("pointerup", {
+          bubbles: true,
+          cancelable: true,
+          pointerType: "mouse",
+          isPrimary: true
+        }));
+      }
+      button.dispatchEvent(new MouseEvent("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      }));
+      button.click();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const applyButtonChoiceAnswer = async (answer, field) => {
+    if (!refreshButtonFieldNodes(field)) {
+      answer.action = "unresolved";
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "The choice buttons were replaced or removed after the page audit.";
+      markButtonState(field, "unresolved", answer.reviewReason);
+      return { filled: false, unresolved: true };
+    }
+
+    const liveOwners = [...new Set(
+      field.buttons.map(button => U.getValueOwner?.(button) || "").filter(Boolean)
+    )];
+    const liveOwner = liveOwners.includes("user")
+      ? "user"
+      : liveOwners.includes("agent")
+        ? "agent"
+        : liveOwners[0] || field.valueOwner;
+    const pressedNow = field.buttons
+      .filter(isChoiceButtonPressed)
+      .map(button => cleanText(button.innerText));
+    const liveValue = field.stateful
+      ? (pressedNow[0] || "")
+      : field.currentValue;
+
+    const target = cleanText(
+      Array.isArray(answer.value) ? answer.value[0] : answer.value
+    );
+
+    if (!target) {
+      if (liveOwner === "user" && liveValue) {
+        answer.action = "keep";
+        answer.value = liveValue;
+        answer.source = "user";
+        answer.confidence = 1;
+        answer.requiresReview = false;
+        answer.reviewReason = "";
+        markButtonState(field, "filled");
+        return { filled: true, unresolved: false, kept: true };
+      }
+
+      answer.action = "unresolved";
+      answer.requiresReview = true;
+      answer.reviewReason = answer.reviewReason ||
+        "No supported answer was available for this question.";
+      markButtonState(field, "unresolved", answer.reviewReason);
+      return { filled: false, unresolved: true };
+    }
+
+    if (normalizeText(liveValue) !== normalizeText(field.currentValue)) {
+      answer.action = "conflict";
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "The question changed after the scan, so FastApply preserved the newer choice.";
+      markButtonState(field, "review", answer.reviewReason);
+      return { filled: false, unresolved: true, conflict: true };
+    }
+
+    if (liveValue && normalizeText(liveValue) === normalizeText(target)) {
+      answer.action = "keep";
+      markButtonState(field, "filled");
+      return { filled: true, unresolved: false, kept: true };
+    }
+
+    if (liveValue && liveOwner === "user") {
+      answer.action = "conflict";
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "FastApply found a different answer but preserved the manually selected choice.";
+      markButtonState(field, "review", answer.reviewReason);
+      return { filled: false, unresolved: true, conflict: true };
+    }
+
+    const matchedOption = field.options.find(option => {
+      return normalizeText(option) === normalizeText(target);
+    });
+    const targetButton = matchedOption
+      ? field.buttons.find(button => {
+          return normalizeText(cleanText(button.innerText)) ===
+            normalizeText(matchedOption);
+        })
+      : null;
+
+    if (!targetButton) {
+      answer.value = "";
+      answer.requiresReview = true;
+      answer.reviewReason =
+        "The answer did not exactly match one of the available buttons.";
+      markButtonState(field, "unresolved", answer.reviewReason);
+      return { filled: false, unresolved: true };
+    }
+
+    answer.action = liveValue ? "replace" : "fill";
+    clickChoiceButton(targetButton);
+    await delay(180);
+
+    if (field.stateful) {
+      if (!refreshButtonFieldNodes(field)) {
+        answer.value = "";
+        answer.requiresReview = true;
+        answer.reviewReason =
+          "The page replaced the buttons before the choice could be verified.";
+        markButtonState(field, "unresolved", answer.reviewReason);
+        return { filled: false, unresolved: true };
+      }
+
+      const confirmed = field.buttons.find(button => {
+        return normalizeText(cleanText(button.innerText)) ===
+          normalizeText(matchedOption);
+      });
+
+      if (!confirmed || !isChoiceButtonPressed(confirmed)) {
+        answer.value = "";
+        answer.requiresReview = true;
+        answer.reviewReason = "The page did not confirm the selected choice.";
+        markButtonState(field, "unresolved", answer.reviewReason);
+        return { filled: false, unresolved: true };
+      }
+    }
+
+    answer.value = matchedOption;
+    field.currentValue = matchedOption;
+    field.buttons.forEach(button => {
+      button.dataset.fa_filled = "true";
+      U.setValueOwner?.(button, "agent");
+    });
+    markButtonState(
+      field,
+      answer.requiresReview ? "review" : "filled",
+      answer.reviewReason || ""
+    );
+    return { filled: true, unresolved: false, kept: false };
+  };
+
   const collectDefaultFields = async () => {
     const semanticFields = await collectSemanticFields();
+    const buttonFields = collectButtonChoiceFields();
     const standardFields = U.collectAuditableFields();
 
     const unique = new Map();
 
-    [...standardFields, ...semanticFields].forEach(field => {
+    [...standardFields, ...semanticFields, ...buttonFields].forEach(field => {
       unique.set(field.fieldId, field);
     });
 
@@ -1306,16 +1751,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       conflicts: 0
     };
 
-    for (const answer of answers) {
-      const field = semanticAgentFields.get(answer?.fieldId);
-
-      if (!field) {
-        standardAnswers.push(answer);
-        continue;
-      }
-
-      const result = await applySemanticAnswer(answer, field);
-
+    const accumulate = (result, answer) => {
       if (result.filled) summary.answered += 1;
       if (result.unresolved) summary.unresolved += 1;
       if (result.kept) summary.kept += 1;
@@ -1327,6 +1763,24 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       if (result.filled && answer.requiresReview) {
         summary.reviewRequired += 1;
       }
+    };
+
+    for (const answer of answers) {
+      const buttonField = buttonAgentFields.get(answer?.fieldId);
+
+      if (buttonField) {
+        accumulate(await applyButtonChoiceAnswer(answer, buttonField), answer);
+        continue;
+      }
+
+      const field = semanticAgentFields.get(answer?.fieldId);
+
+      if (!field) {
+        standardAnswers.push(answer);
+        continue;
+      }
+
+      accumulate(await applySemanticAnswer(answer, field), answer);
     }
 
     const standardSummary = await U.applyAgentAnswers(standardAnswers);
@@ -1745,7 +2199,8 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
       const livePageIdentity = buildPageIdentity(getJobContext());
       if (
         livePageKey !== scan.pageKey ||
-        livePageIdentity !== scan.pageIdentity
+        comparableIdentityUrl(livePageIdentity) !==
+          comparableIdentityUrl(scan.pageIdentity)
       ) {
         throw new Error(
           "The application page changed while Agent 2 was auditing it. Inspect the current page and run the audit again."
@@ -1766,10 +2221,14 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
 
       const seenFieldIds = new Set(agentFields.map(field => field.fieldId));
 
-      // Workday reveals dependent questions after a controlling dropdown is
-      // selected. Audit those newly rendered fields automatically during the
-      // same button click instead of making the applicant run Agent 2 again.
-      if (configuration?.atsPlatform === "workday") {
+      // Most ATS forms reveal dependent questions after a controlling answer
+      // is applied (Workday dropdown chains, SuccessFactors/Oracle/Phenom
+      // conditional sections, "If yes, explain" follow-ups). Audit those
+      // newly rendered fields automatically during the same button click
+      // instead of making the applicant run Agent 2 again. Greenhouse keeps
+      // its original single-pass behavior: its custom collector re-sweeps
+      // every dropdown, which is too disruptive to repeat unprompted.
+      if (configuration?.atsPlatform !== "greenhouse") {
         for (let wave = 0; wave < 2; wave += 1) {
           await delay(550);
 
@@ -1805,7 +2264,7 @@ console.log("[FastApply] Manual Agent 2 Controller Active.");
 
           if (!waveResponse?.success) {
             console.warn(
-              "[FastApply] Conditional Workday audit could not be completed:",
+              "[FastApply] Conditional follow-up audit could not be completed:",
               waveResponse?.error || "Unknown error"
             );
             break;

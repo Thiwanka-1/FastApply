@@ -2,7 +2,7 @@
 // Bump this stamp on every build: it prints in the console banner so a stale
 // extension load (Chrome runs the old copy until "Reload" is clicked in
 // chrome://extensions) is immediately visible.
-const FASTAPPLY_BUILD = "2026-08-25.3";
+const FASTAPPLY_BUILD = "2026-08-31.1";
 console.log(`[FastApply] Utils Loaded. (build ${FASTAPPLY_BUILD})`);
 
 const normalizeValue = (value) => String(value ?? "").trim();
@@ -110,11 +110,16 @@ const trackTrustedUserEdit = event => {
       return;
     }
 
-    const answerButton = event.target?.closest?.("button");
+    const answerButton = event.target?.closest?.('button, [role="button"]');
     const answerText = normalizeText(getElementText(answerButton));
     if (
       answerButton &&
-      (answerButton.hasAttribute("aria-pressed") || /^(yes|no)$/.test(answerText))
+      (
+        answerButton.hasAttribute("aria-pressed") ||
+        answerButton.hasAttribute("aria-selected") ||
+        answerButton.hasAttribute("data-state") ||
+        /^(yes|no)$/.test(answerText)
+      )
     ) {
       setValueOwner(answerButton, "user");
     }
@@ -1310,7 +1315,97 @@ const getElementCurrentValue = element => {
   return normalizeValue(element.value);
 };
 
+const MONTH_NAME_NUMBERS = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
+};
+
+// Best-effort parse of the date formats an LLM or profile realistically
+// produces. Returns { year, month, day|null } or null when unparseable.
+const parseFlexibleDateValue = value => {
+  const raw = normalizeValue(value);
+  if (!raw) return null;
+
+  let match = raw.match(/^(\d{4})[-/.](\d{1,2})(?:[-/.](\d{1,2}))?$/);
+  if (match) {
+    return {
+      year: Number(match[1]),
+      month: Number(match[2]),
+      day: match[3] ? Number(match[3]) : null
+    };
+  }
+
+  match = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  if (match) {
+    const first = Number(match[1]);
+    const second = Number(match[2]);
+    // First segment above 12 can only be a day; otherwise assume MM/DD/YYYY.
+    return {
+      year: Number(match[3]),
+      month: first > 12 ? second : first,
+      day: first > 12 ? first : second
+    };
+  }
+
+  match = raw.match(/^(\d{1,2})[-/.](\d{4})$/);
+  if (match) {
+    return { year: Number(match[2]), month: Number(match[1]), day: null };
+  }
+
+  match = raw.match(/^([a-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$/i);
+  if (match) {
+    const month = MONTH_NAME_NUMBERS[match[1].slice(0, 3).toLowerCase()];
+    if (month) return { year: Number(match[3]), month, day: Number(match[2]) };
+  }
+
+  match = raw.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]{3,9})\.?,?\s+(\d{4})$/i);
+  if (match) {
+    const month = MONTH_NAME_NUMBERS[match[2].slice(0, 3).toLowerCase()];
+    if (month) return { year: Number(match[3]), month, day: Number(match[1]) };
+  }
+
+  match = raw.match(/^([a-z]{3,9})\.?,?\s+(\d{4})$/i);
+  if (match) {
+    const month = MONTH_NAME_NUMBERS[match[1].slice(0, 3).toLowerCase()];
+    if (month) return { year: Number(match[2]), month, day: null };
+  }
+
+  return null;
+};
+
+// Native date/month inputs silently reject any value not in their ISO wire
+// format, so answers like "03/15/2020" or "March 2020" never stuck.
+const formatValueForDateInput = (value, inputType) => {
+  const parsed = parseFlexibleDateValue(value);
+  if (
+    !parsed ||
+    parsed.month < 1 || parsed.month > 12 ||
+    parsed.year < 1900 || parsed.year > 2100 ||
+    (parsed.day !== null && (parsed.day < 1 || parsed.day > 31))
+  ) {
+    return "";
+  }
+
+  const month = String(parsed.month).padStart(2, "0");
+  if (inputType === "month") return `${parsed.year}-${month}`;
+  // A full date input needs a day; guessing one would invent a fact.
+  if (parsed.day === null) return "";
+  return `${parsed.year}-${month}-${String(parsed.day).padStart(2, "0")}`;
+};
+
 const prepareValueForElement = (element, value) => {
+  const elementType = normalizeText(element?.getAttribute?.("type") || "");
+
+  if (elementType === "date" || elementType === "month") {
+    return formatValueForDateInput(value, elementType);
+  }
+
+  if (elementType === "number") {
+    const cleaned = normalizeValue(value).replace(/[$€£,\s]/g, "");
+    if (/^-?\d+(\.\d+)?$/.test(cleaned)) return cleaned;
+    return normalizeValue(value);
+  }
+
   const label = normalizeText(
     `${element?.getAttribute?.("type") || ""} ${getLabelText(element)}`
   );
@@ -1589,7 +1684,12 @@ const collectApplicationFields = (root = document, includeFilled = false) => {
   ).forEach(element => {
     const inputType = normalizeText(element.getAttribute?.("type") || "");
     if (element.tagName === "INPUT" && excludedInputTypes.has(inputType)) return;
+    // Combobox-role widgets belong to the semantic collector — but a native
+    // <select> stays here even when a framework stamps role="combobox" on it
+    // (the semantic collector skips SELECTs, so excluding it here made the
+    // field invisible to both collectors).
     if (
+      element.tagName !== "SELECT" &&
       element.matches?.(
         '[role="combobox"], [aria-haspopup="listbox"]'
       )

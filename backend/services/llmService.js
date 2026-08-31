@@ -24,6 +24,7 @@ const DEFAULT_HF_VISION_PROVIDER = 'novita';
 const CORE_PROFILE_TEMPLATE = {
   personalInfo: {
     firstName: '',
+    middleName: '',
     lastName: '',
     preferredName: '',
     pronouns: '',
@@ -117,6 +118,7 @@ const MEMORY_ANSWER_TEMPLATE = {
 const CQFO_PERSONAL_TEMPLATE = {
   personalInfo: {
     firstName: '',
+    middleName: '',
     lastName: ''
   },
 
@@ -831,6 +833,18 @@ RULES:
 13. Do not copy complete resume paragraphs.
 14. Do not include applicationMemory in this response.
 15. Return raw JSON only.
+
+NAME FIELDS:
+
+- firstName: the first given name only.
+- middleName: any middle name(s) or middle initial(s) appearing between the
+  first and last name in the candidate's full or legal name. Empty when the
+  candidate has none.
+- lastName: the family name / surname only.
+- preferredName: ONLY a nickname or preferred/goes-by name the documents
+  explicitly state (for example 'Preferred name:', 'goes by', or a quoted
+  nickname). A middle name is NEVER a preferred name. When no preferred name
+  is explicitly stated, return an empty string.
 `.trim();
 
   const userPrompt = `
@@ -927,6 +941,9 @@ GENERAL RULES:
 
 NORMALIZATION:
 
+- Split the candidate's full or legal name into firstName, middleName and
+  lastName. middleName holds any middle name(s) or initial(s) between the
+  first and last name, or "" when there is none.
 - Use "United States" instead of "USA" for address country.
 - authorizedToWork must be "Yes", "No" or "".
 - requireVisaNow must be "Yes", "No" or "".

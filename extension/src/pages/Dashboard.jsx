@@ -27,6 +27,7 @@ const normalizeProfile = profile => ({
 
   personalInfo: {
     firstName: '',
+    middleName: '',
     lastName: '',
     preferredName: '',
     pronouns: '',

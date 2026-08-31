@@ -180,12 +180,21 @@ const handleGenericCustoms = profile => {
 
     let targetValue = "";
 
-    if (/(first|given).*name/i.test(labelText)) {
+    if (/preferred.*name/i.test(labelText)) {
+      targetValue = pInfo.preferredName || pInfo.firstName;
+    } else if (/(first|given).*name/i.test(labelText)) {
       targetValue = pInfo.firstName;
     } else if (/(last|family|sur).*name/i.test(labelText)) {
       targetValue = pInfo.lastName;
+    } else if (/middle\s*initial/i.test(labelText)) {
+      targetValue = String(pInfo.middleName || "").trim().charAt(0).toUpperCase();
+    } else if (/middle\s*name/i.test(labelText)) {
+      targetValue = pInfo.middleName;
     } else if (/(full.*name|^name\*?$)/i.test(labelText)) {
-      targetValue = `${pInfo.firstName || ""} ${pInfo.lastName || ""}`.trim();
+      targetValue = [pInfo.firstName, pInfo.middleName, pInfo.lastName]
+        .map(part => String(part || "").trim())
+        .filter(Boolean)
+        .join(" ");
     } else if (/email/i.test(labelText)) {
       targetValue = cInfo.email;
     } else if (/(phone|mobile|cell|telephone)/i.test(labelText)) {
@@ -194,6 +203,8 @@ const handleGenericCustoms = profile => {
       targetValue = U.formatPhoneNumber(cInfo.phone);
     } else if (/(address line 1|street address)/i.test(labelText)) {
       targetValue = cInfo.addressLine1;
+    } else if (/(address line 2|address 2|apartment|suite|unit number)/i.test(labelText)) {
+      targetValue = cInfo.addressLine2;
     } else if (/city/i.test(labelText)) {
       targetValue = cInfo.city;
     } else if (/(zip|postal)/i.test(labelText)) {
@@ -384,7 +395,22 @@ const looksLikeJobApplicationPage = () => {
   const urlText = `${window.location.hostname} ${window.location.pathname}`
     .toLowerCase();
 
-  if (/\b(job|jobs|career|careers|apply|application)\b/.test(urlText)) {
+  if (
+    /\b(job|jobs|career|careers|apply|application|applications|requisition|posting|postings|vacancy|vacancies|opportunity|opportunities|recruit|recruiting|talent|hiring|ats)\b/.test(
+      urlText
+    )
+  ) {
+    return true;
+  }
+
+  // ATS URL fragments written as single compound words, which the
+  // word-boundary regex above cannot match (Cornerstone "careersite",
+  // Oracle HCM "candidateexperience", Avature "jobdetail", Pinpoint).
+  if (
+    /(careersite|candidateexperience|jobdetail|joblisting|jobboard|pinpointhq|myworkday|successfactors)/.test(
+      urlText
+    )
+  ) {
     return true;
   }
 

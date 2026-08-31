@@ -103,6 +103,7 @@ const profileSchema = new mongoose.Schema(
 
     personalInfo: {
       firstName: { type: String, default: '' },
+      middleName: { type: String, default: '' },
       lastName: { type: String, default: '' },
       preferredName: { type: String, default: '' },
       pronouns: { type: String, default: '' },

@@ -369,6 +369,11 @@ const ProfileCopy = ({ profile }) => {
         />
 
         <CopyField
+          label="Middle Name"
+          value={personal.middleName}
+        />
+
+        <CopyField
           label="Last Name"
           value={personal.lastName}
         />
