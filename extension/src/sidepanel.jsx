@@ -21,7 +21,8 @@ import {
   ExternalLink,
   FileText,
   Zap,
-  RefreshCw
+  RefreshCw,
+  Code
 } from 'lucide-react';
 import './index.css';
 
@@ -340,6 +341,40 @@ const Metric = ({
   );
 };
 
+const SkillPill = ({ skill }) => {
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(skill);
+    setCopied(true);
+
+    window.setTimeout(() => {
+      setCopied(false);
+    }, 1500);
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      title="Copy skill"
+      className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-xs font-medium transition-colors ${
+        copied
+          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+          : 'border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-300 hover:border-fuchsia-400/60'
+      }`}
+    >
+      <span>{skill}</span>
+
+      {copied ? (
+        <Check className="h-3 w-3 shrink-0" />
+      ) : (
+        <Copy className="h-3 w-3 shrink-0 opacity-60" />
+      )}
+    </button>
+  );
+};
+
 const ProfileCopy = ({ profile }) => {
   if (!profile) {
     return (
@@ -525,6 +560,42 @@ const ProfileCopy = ({ profile }) => {
               </div>
             )
           )}
+        </section>
+      )}
+
+      {profile.websitesAndSkills?.skills
+        ?.length > 0 && (
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+          <h3 className="mb-2 flex items-center font-bold text-white">
+            <Code className="mr-2 h-4 w-4 text-fuchsia-400" />
+            Skills
+
+            <span className="ml-2 rounded-full border border-fuchsia-500/30 bg-fuchsia-500/10 px-2 py-0.5 text-[10px] font-bold text-fuchsia-300">
+              {
+                profile.websitesAndSkills
+                  .skills.length
+              }
+            </span>
+          </h3>
+
+          <CopyField
+            label="All Skills"
+            value={
+              profile.websitesAndSkills
+                .skills
+            }
+          />
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {profile.websitesAndSkills.skills.map(
+              (skill, index) => (
+                <SkillPill
+                  key={`${skill}_${index}`}
+                  skill={skill}
+                />
+              )
+            )}
+          </div>
         </section>
       )}
 

@@ -828,9 +828,14 @@ RULES:
 8. Set currentlyWorkHere only when the documents support it.
 9. Do not calculate age from date of birth.
 10. EEO and visa answers must come from explicit document evidence.
-11. Keep every job description below 700 characters.
+11. workHistory description must be the COMPLETE description of that
+    position copied word for word from the resume: every bullet point and
+    sentence listed under that job, in the original order, with nothing
+    omitted, shortened or summarized. Put each bullet on its own line,
+    separated by a newline character, without the leading bullet symbol.
 12. Return no more than 100 unique skills.
-13. Do not copy complete resume paragraphs.
+13. Outside workHistory descriptions, do not copy complete resume
+    paragraphs.
 14. Do not include applicationMemory in this response.
 15. Return raw JSON only.
 
@@ -1621,7 +1626,9 @@ const makeHuggingFaceRequest = async ({
 
   const defaultMaxTokens = task === 'writing'
     ? getPositiveInteger(process.env.HF_WRITING_MAX_TOKENS, DEFAULT_WRITING_TOKENS)
-    : getPositiveInteger(process.env.HF_PROFILE_MAX_TOKENS, 6000);
+    // Verbatim work-history descriptions make the profile JSON much larger;
+    // a low cap silently truncated the response mid-JSON.
+    : getPositiveInteger(process.env.HF_PROFILE_MAX_TOKENS, 9000);
 
   const maxTokens = maxTokensOverride || defaultMaxTokens;
 
@@ -1881,7 +1888,7 @@ export const extractProfileData = async (input) => {
 
   const coreResult = await runExtractionRequest({
     prompts: buildCoreProfilePrompts(documentContext),
-    maxTokens: getPositiveInteger(process.env.HF_PROFILE_MAX_TOKENS, 6000),
+    maxTokens: getPositiveInteger(process.env.HF_PROFILE_MAX_TOKENS, 9000),
     responseSchema: CORE_PROFILE_SCHEMA,
     schemaName: 'candidate_profile'
   });

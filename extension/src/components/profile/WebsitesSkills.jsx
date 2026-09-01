@@ -95,6 +95,9 @@ export default function WebsitesSkills({ data, updateSection }) {
         <h3 className="text-lg font-bold text-white mb-2 flex items-center">
           <Code className="w-5 h-5 mr-3 text-fuchsia-400" />
           Technical & Soft Skills
+          <span className="ml-3 bg-fuchsia-500/10 border border-fuchsia-500/30 text-fuchsia-300 px-2.5 py-0.5 rounded-full text-xs font-bold">
+            {data?.skills?.length || 0} {(data?.skills?.length || 0) === 1 ? 'skill' : 'skills'}
+          </span>
         </h3>
         <p className="text-slate-400 text-sm mb-6">Type a skill and press <kbd className="bg-slate-800 px-2 py-0.5 rounded text-slate-300 mx-1 border border-slate-700">Enter</kbd> to add it to your profile.</p>
         
